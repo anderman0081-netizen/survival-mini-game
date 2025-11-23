@@ -1,0 +1,2041 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <title>Survival Mini - Shape Bullet Hell</title>
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+      background: #000;
+      touch-action: none;
+    }
+    canvas {
+      display: block;
+    }
+
+    /* 모바일용 조이스틱 */
+    #joystick-base, #joystick-stick {
+      position: fixed;
+      border-radius: 50%;
+      pointer-events: none;
+      opacity: 0;
+      z-index: 10;
+      transition: opacity 0.1s;
+    }
+    #joystick-base {
+      background: rgba(255,255,255,0.08);
+      border: 2px solid rgba(255,255,255,0.25);
+    }
+    #joystick-stick {
+      background: rgba(255,255,255,0.22);
+      border: 2px solid rgba(255,255,255,0.6);
+    }
+
+    /* 상단 왼쪽 UI 버튼 묶음 */
+    #top-left-ui {
+      position: fixed;
+      left: 20px;
+      top: 150px; /* 상태창(120px) 밑으로 */
+      display: flex;
+      gap: 10px;
+      z-index: 10;
+    }
+    .ui-btn {
+      width: 56px;
+      height: 56px;
+      border-radius: 50%;
+      border: 1px solid rgba(255,255,255,0.6);
+      background: rgba(40,40,40,0.8);
+      color: #fff;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 18px;
+      user-select: none;
+      -webkit-user-select: none;
+      cursor: pointer;
+    }
+    #skill-btn {
+      width: 74px;
+      height: 74px;
+      background: rgba(120,0,0,0.8);
+      font-size: 24px;
+      border-radius: 50%;
+    }
+    #skill-btn.cooldown {
+      background: rgba(60,60,60,0.85);
+    }
+  </style>
+</head>
+<body>
+<canvas id="game"></canvas>
+
+<!-- 모바일 조이스틱 -->
+<div id="joystick-base"></div>
+<div id="joystick-stick"></div>
+
+<!-- 상단 왼쪽 UI 버튼들: 미니맵 / 도움말 / 폭탄 -->
+<div id="top-left-ui">
+  <div id="mini-btn" class="ui-btn">M</div>
+  <div id="help-btn" class="ui-btn">H</div>
+  <div id="skill-btn" class="ui-btn">💥</div>
+</div>
+
+<!-- BGM: 타이틀 / 인게임 -->
+<audio id="bgm-title" src="assets/bgm/title.mp3" loop></audio>
+<audio id="bgm-game"  src="assets/bgm/game.mp3"  loop></audio>
+
+<script>
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+
+  function resize() {
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  // ====== 게임 상태 ======
+  // 'menu' | 'playing' | 'gameover'
+  let gameState = 'menu';
+  let gameOver = false;
+
+  // 첫 입력에서만 오디오 언락용
+  let audioReady = false;
+
+  const keys = {};
+  let minimapVisible = false;
+  let isChoosingUpgrade = false;
+  let upgradeChoices = [];
+  let upgradeChoiceRects = [];
+  let upgradeSelectedIndex = 0;
+  let helpVisible = false;
+
+  // ====== 오디오 컨트롤 ======
+  const bgmTitle = document.getElementById('bgm-title');
+  const bgmGame  = document.getElementById('bgm-game');
+  let bgmTitleStarted = false;
+  let bgmGameStarted  = false;
+
+  function stopAllBgm() {
+    if (bgmTitle) {
+      bgmTitle.pause();
+      bgmTitle.currentTime = 0;
+      bgmTitleStarted = false;
+    }
+    if (bgmGame) {
+      bgmGame.pause();
+      bgmGame.currentTime = 0;
+      bgmGameStarted = false;
+    }
+  }
+
+  function playTitleBgm() {
+    if (!bgmTitle) return;
+    if (bgmGame) {
+      bgmGame.pause();
+      bgmGame.currentTime = 0;
+      bgmGameStarted = false;
+    }
+    bgmTitle.volume = 0.5;
+    bgmTitle.play().then(() => {
+      bgmTitleStarted = true;
+    }).catch(() => {
+      bgmTitleStarted = false;
+    });
+  }
+
+  function playGameBgm() {
+    if (!bgmGame) return;
+    if (bgmTitle) {
+      bgmTitle.pause();
+      bgmTitle.currentTime = 0;
+      bgmTitleStarted = false;
+    }
+    bgmGame.volume = 0.5;
+    bgmGame.play().then(() => {
+      bgmGameStarted = true;
+    }).catch(() => {
+      bgmGameStarted = false;
+    });
+  }
+
+  // ====== 타이틀 이미지 로드 ======
+  const titleImage = new Image();
+  let titleImageLoaded = false;
+  titleImage.src = 'assets/img/title-survival-mini.png';   // 실제 파일 이름에 맞춤
+  titleImage.onload = () => { titleImageLoaded = true; };
+
+  // ====== 입력 처리 ======
+  window.addEventListener('keydown', e => {
+    const key = e.key;
+
+    // --- 메뉴 상태 ---
+    if (gameState === 'menu') {
+      // 첫 입력: 오디오 언락 + 타이틀 브금 시작
+      if (!audioReady) {
+        audioReady = true;
+        playTitleBgm();
+      } else {
+        // 두 번째 입력부터: 게임 시작
+        startGame();
+        playGameBgm();
+      }
+      e.preventDefault();
+      return;
+    }
+
+    // --- 게임오버 상태 ---
+    if (gameState === 'gameover') {
+      if (key === 'r' || key === 'R' || key === ' ' || e.code === 'Space' || key === 'Enter') {
+        resetGame();
+        gameOver = false;
+        gameState = 'menu';
+        stopAllBgm();
+        audioReady = true;
+        playTitleBgm();
+      }
+      e.preventDefault();
+      return;
+    }
+
+    // 여기부터는 playing 상태
+    // 업그레이드 선택 중 방향키 자동 반복 방지
+    if (
+      isChoosingUpgrade &&
+      e.repeat &&
+      (
+        key === 'ArrowLeft' || key === 'ArrowRight' ||
+        key === 'a' || key === 'A' ||
+        key === 'd' || key === 'D'
+      )
+    ) {
+      e.preventDefault();
+      return;
+    }
+
+    keys[key] = true;
+
+    // H: 도움말 토글
+    if (key === 'h' || key === 'H') {
+      helpVisible = !helpVisible;
+      e.preventDefault();
+      return;
+    }
+
+    // B: 폭탄 사용
+    if ((key === 'b' || key === 'B') && !gameOver && !isChoosingUpgrade && !helpVisible) {
+      useBomb();
+      e.preventDefault();
+      return;
+    }
+
+    // 업글 선택 중 방향키 & 스페이스 처리
+    if (isChoosingUpgrade) {
+      if (key === 'ArrowLeft' || key === 'a' || key === 'A') {
+        if (upgradeChoices.length > 0) {
+          upgradeSelectedIndex =
+            (upgradeSelectedIndex - 1 + upgradeChoices.length) % upgradeChoices.length;
+        }
+        e.preventDefault();
+        return;
+      }
+
+      if (key === 'ArrowRight' || key === 'd' || key === 'D') {
+        if (upgradeChoices.length > 0) {
+          upgradeSelectedIndex =
+            (upgradeSelectedIndex + 1) % upgradeChoices.length;
+        }
+        e.preventDefault();
+        return;
+      }
+
+      if (key === ' ' || e.code === 'Space') {
+        if (upgradeChoices.length > 0) {
+          const choice = upgradeChoices[upgradeSelectedIndex];
+          applyUpgrade(choice);
+        }
+        e.preventDefault();
+        return;
+      }
+
+      return;
+    }
+
+    // M: 미니맵 토글
+    if (key === 'm' || key === 'M') {
+      minimapVisible = !minimapVisible;
+      return;
+    }
+  });
+
+  window.addEventListener('keyup', e => {
+    keys[e.key] = false;
+  });
+
+  // ====== 모바일/조이스틱 이동 상태 ======
+  const touchMove = { up: false, down: false, left: false, right: false };
+
+  const joystickBase = document.getElementById('joystick-base');
+  const joystickStick = document.getElementById('joystick-stick');
+  let joystickActive = false;
+  let joystickId = null;
+  let joystickCenterX = 0;
+  let joystickCenterY = 0;
+  const joystickRadius = 60;
+
+  function resetTouchMove() {
+    touchMove.up = touchMove.down = touchMove.left = touchMove.right = false;
+  }
+
+  function updateTouchMoveFromVector(dx, dy) {
+    resetTouchMove();
+    const len = Math.hypot(dx, dy);
+    if (len < 10) return;
+
+    const nx = dx / len;
+    const ny = dy / len;
+    const threshold = 0.35;
+
+    if (nx <= -threshold) touchMove.left = true;
+    if (nx >= threshold) touchMove.right = true;
+    if (ny <= -threshold) touchMove.up = true;
+    if (ny >= threshold) touchMove.down = true;
+  }
+
+  function showJoystick(x, y) {
+    joystickCenterX = x;
+    joystickCenterY = y;
+
+    const baseSize = joystickRadius * 2;
+    joystickBase.style.width = baseSize + 'px';
+    joystickBase.style.height = baseSize + 'px';
+    joystickBase.style.left = (x - joystickRadius) + 'px';
+    joystickBase.style.top = (y - joystickRadius) + 'px';
+    joystickBase.style.opacity = 0.4;
+
+    const stickSize = joystickRadius * 1.2;
+    joystickStick.style.width = stickSize + 'px';
+    joystickStick.style.height = stickSize + 'px';
+    joystickStick.style.left = (x - stickSize / 2) + 'px';
+    joystickStick.style.top = (y - stickSize / 2) + 'px';
+    joystickStick.style.opacity = 0.7;
+  }
+
+  function moveJoystick(x, y) {
+    const dx = x - joystickCenterX;
+    const dy = y - joystickCenterY;
+    const len = Math.hypot(dx, dy);
+    let clampedX = dx;
+    let clampedY = dy;
+    if (len > joystickRadius) {
+      const ratio = joystickRadius / (len || 1);
+      clampedX *= ratio;
+      clampedY *= ratio;
+    }
+
+    const stickSize = joystickRadius * 1.2;
+    joystickStick.style.left =
+      (joystickCenterX + clampedX - stickSize / 2) + 'px';
+    joystickStick.style.top =
+      (joystickCenterY + clampedY - stickSize / 2) + 'px';
+
+    updateTouchMoveFromVector(dx, dy);
+  }
+
+  function hideJoystick() {
+    joystickBase.style.opacity = 0;
+    joystickStick.style.opacity = 0;
+    joystickActive = false;
+    joystickId = null;
+    resetTouchMove();
+  }
+
+  function handleJoystickTouchStart(e) {
+    if (gameState !== 'playing' || gameOver || isChoosingUpgrade || helpVisible) return;
+
+    for (let i = 0; i < e.changedTouches.length; i++) {
+      const t = e.changedTouches[i];
+      if (!joystickActive) {
+        joystickActive = true;
+        joystickId = t.identifier;
+        showJoystick(t.clientX, t.clientY);
+        moveJoystick(t.clientX, t.clientY);
+        e.preventDefault();
+        return;
+      }
+    }
+  }
+
+  function handleJoystickTouchMove(e) {
+    if (!joystickActive) return;
+    for (let i = 0; i < e.changedTouches.length; i++) {
+      const t = e.changedTouches[i];
+      if (t.identifier === joystickId) {
+        moveJoystick(t.clientX, t.clientY);
+        e.preventDefault();
+        return;
+      }
+    }
+  }
+
+  function handleJoystickTouchEnd(e) {
+    if (!joystickActive) return;
+    for (let i = 0; i < e.changedTouches.length; i++) {
+      const t = e.changedTouches[i];
+      if (t.identifier === joystickId) {
+        hideJoystick();
+        e.preventDefault();
+        return;
+      }
+    }
+  }
+
+  canvas.addEventListener('touchstart', handleJoystickTouchStart, { passive: false });
+  canvas.addEventListener('touchmove', handleJoystickTouchMove, { passive: false });
+  canvas.addEventListener('touchend', handleJoystickTouchEnd, { passive: false });
+  canvas.addEventListener('touchcancel', handleJoystickTouchEnd, { passive: false });
+
+  // ====== 플레이어 & 스탯 ======
+  const player = {
+    x: 0,
+    y: 0,
+    r: 15,
+    speed: 220,
+    maxHp: 3,
+    hp: 3,
+    level: 1,
+    xp: 0,
+    xpToNext: 5
+  };
+
+  let bulletSpeed = 400;
+  let bulletRadius = 5;
+  let xpGainMultiplier = 1;
+
+  let bulletCount = 1;
+  let bulletPierce = 0;
+  let splitLevel = 0;
+  let chainLevel = 0;
+
+  const orbitBlades = [];
+  let slowAuraRadius = 0;
+  const slowAuraFactor = 0.6;
+
+  // 경험치 자석 관련
+  let magnetRadius = 80;
+  let magnetBaseSpeed = 80;
+  let magnetMaxSpeed = 5000;
+  let magnetAccel = 300;
+
+  const enemies = [];
+  const bullets = [];
+  const xpOrbs = [];
+  const hearts = [];
+  const lightningArcs = [];
+  const pendingChainKills = [];
+
+  let lastTime = performance.now();
+  let enemySpawnTimer = 0;
+  let enemySpawnInterval = 1000;
+  let shootTimer = 0;
+  let shootInterval = 400;
+  let score = 0;
+  let bestScore = 0;
+
+  let stage = 1;
+  let nextStageScore = 50;
+
+  let heartSpawnTimer = 0;
+  let heartSpawnInterval = 14;
+
+  // 레벨/스테이지 팝업
+  const levelPopup = { level: null, time: 0, duration: 1.2 };
+  const stagePopup = { stage: null, time: 0, duration: 1.2 };
+
+  let screenShakeTime = 0;
+  let screenShakeDuration = 0;
+  let screenShakePower = 0;
+
+  let hitFlashTime = 0;
+  let hitFlashDuration = 0;
+
+  // 버튼
+  const skillBtn = document.getElementById('skill-btn');
+  const miniBtn = document.getElementById('mini-btn');
+  const helpBtn = document.getElementById('help-btn');
+  let skillCooldown = 0;
+  const skillMaxCooldown = 5;
+
+  // 적 타입
+  const enemyConfigs = [
+    { type: 'circle',   corners: 0, hp: 1, xp: 1, weight: 60, unlockLevel: 1  },
+    { type: 'triangle', corners: 3, hp: 2, xp: 2, weight: 25, unlockLevel: 6  },
+    { type: 'square',   corners: 4, hp: 3, xp: 3, weight: 10, unlockLevel: 11 },
+    { type: 'star',     corners: 5, hp: 4, xp: 4, weight: 5,  unlockLevel: 16 }
+  ];
+
+  // 업그레이드 목록
+  const allUpgrades = [
+    {
+      id: 'hp',
+      name: '체력 +1',
+      desc: '최대 HP +1, 즉시 회복',
+      apply() {
+        player.maxHp += 1;
+        player.hp = player.maxHp;
+      }
+    },
+    {
+      id: 'movespeed',
+      name: '이속 +15%',
+      desc: '이동 속도 15% 증가',
+      apply() {
+        player.speed *= 1.15;
+      }
+    },
+    {
+      id: 'attackspeed',
+      name: '공속 증가',
+      desc: '사격 간격 40ms 감소 (최소 150ms)',
+      apply() {
+        shootInterval = Math.max(150, shootInterval - 40);
+      }
+    },
+    {
+      id: 'bulletspeed',
+      name: '탄속 +20%',
+      desc: '총알 속도 20% 증가',
+      apply() {
+        bulletSpeed *= 1.2;
+      }
+    },
+    {
+      id: 'bulletsize',
+      name: '총알 크기 +1',
+      desc: '총알 반지름 +1 (명중 판정 증가)',
+      apply() {
+        bulletRadius += 1;
+      }
+    },
+    {
+      id: 'xpgain',
+      name: '경험치 +20%',
+      desc: '획득 경험치 20% 증가',
+      apply() {
+        xpGainMultiplier *= 1.2;
+      }
+    },
+    {
+      id: 'magnet',
+      name: '자석 범위 +40',
+      desc: '경험치 구슬이 빨려 들어오는 범위 +40',
+      apply() {
+        magnetRadius += 40;
+      }
+    },
+    {
+      id: 'multishot',
+      name: '멀티샷',
+      desc: '한 번에 발사하는 탄 수 +1 (최대 3발)',
+      apply() {
+        if (bulletCount < 3) bulletCount += 1;
+      }
+    },
+    {
+      id: 'pierce',
+      name: '관통탄',
+      desc: '총알이 적을 관통 (관통 가능 횟수 +1, 최대 3회)',
+      apply() {
+        if (bulletPierce < 3) bulletPierce += 1;
+      }
+    },
+    {
+      id: 'orbitBlade',
+      name: '회전 칼날',
+      desc: '플레이어 주변을 도는 초승달 칼날 +1 (최대 3개)',
+      apply() {
+        if (orbitBlades.length < 3) {
+          const count = orbitBlades.length;
+          orbitBlades.push({
+            angle: (count / 3) * Math.PI * 2,
+            radius: 110 + count * 25,
+            speed: 3 + count * 0.8,
+            r: 18,
+            dmg: 1.2
+          });
+        }
+      }
+    },
+    {
+      id: 'frostAura',
+      name: '빙결 오라',
+      desc: '주변 적 이동 속도 감소 범위 +70 (푸른 오라 표시)',
+      apply() {
+        slowAuraRadius += 70;
+      }
+    },
+    {
+      id: 'split',
+      name: '분열 탄환',
+      desc: '총알로 적 처치 시 주변으로 작은 탄환 분열 (최대 3단계)',
+      apply() {
+        if (splitLevel < 3) splitLevel += 1;
+      }
+    },
+    {
+      id: 'chain',
+      name: '체인 라이트닝',
+      desc: '총알로 적 처치 시 주변 적에게 번개 튐 (최대 3단계)',
+      apply() {
+        if (chainLevel < 3) chainLevel += 1;
+      }
+    }
+  ];
+
+  function randomSampleNoRepeat(arr, count) {
+    const pool = arr.slice();
+    const res = [];
+    const n = Math.min(count, pool.length);
+    for (let i = 0; i < n; i++) {
+      const idx = Math.floor(Math.random() * pool.length);
+      res.push(pool[idx]);
+      pool.splice(idx, 1);
+    }
+    return res;
+  }
+
+  function openUpgradeChoices() {
+    isChoosingUpgrade = true;
+    upgradeChoices = randomSampleNoRepeat(allUpgrades, 3);
+    upgradeSelectedIndex = 0;
+  }
+
+  function applyUpgrade(choice) {
+    if (!choice) return;
+    choice.apply();
+    isChoosingUpgrade = false;
+    upgradeChoices = [];
+    upgradeChoiceRects = [];
+    upgradeSelectedIndex = 0;
+  }
+
+  function checkLevelUp() {
+    while (!isChoosingUpgrade && player.xp >= player.xpToNext) {
+      player.xp -= player.xpToNext;
+      player.level += 1;
+      player.xpToNext = Math.floor(player.xpToNext * 1.5);
+
+      player.hp = Math.min(player.maxHp, player.hp + 1);
+
+      levelPopup.level = player.level;
+      levelPopup.time = levelPopup.duration;
+
+      openUpgradeChoices();
+    }
+  }
+
+  function checkStageUp() {
+    while (score >= nextStageScore) {
+      stage += 1;
+      nextStageScore = Math.floor(nextStageScore * 2.2);
+      screenShakeTime = screenShakeDuration = 0.3;
+      screenShakePower = 4;
+
+      stagePopup.stage = stage;
+      stagePopup.time = stagePopup.duration;
+    }
+  }
+
+  function randEnemyType(level) {
+    const available = enemyConfigs.filter(t => level >= t.unlockLevel);
+    if (available.length === 0) return enemyConfigs[0];
+    const totalWeight = available.reduce((sum, t) => sum + t.weight, 0);
+    let r = Math.random() * totalWeight;
+    for (const t of available) {
+      if (r < t.weight) return t;
+      r -= t.weight;
+    }
+    return available[available.length - 1];
+  }
+
+  function enemiesPerSpawn(level) {
+    if (level <= 2) return 1;
+    if (level <= 4) return 2;
+    if (level <= 7) return 3;
+    return 4;
+  }
+
+  function spawnEnemy() {
+    const count = enemiesPerSpawn(player.level);
+    const halfW = canvas.width / 2;
+    const halfH = canvas.height / 2;
+
+    for (let k = 0; k < count; k++) {
+      const side = Math.floor(Math.random() * 4);
+      let x, y;
+
+      if (side === 0) {
+        x = player.x - halfW - 20;
+        y = player.y + (Math.random() * 2 - 1) * (halfH + 50);
+      } else if (side === 1) {
+        x = player.x + halfW + 20;
+        y = player.y + (Math.random() * 2 - 1) * (halfH + 50);
+      } else if (side === 2) {
+        x = player.x + (Math.random() * 2 - 1) * (halfW + 50);
+        y = player.y - halfH - 20;
+      } else {
+        x = player.x + (Math.random() * 2 - 1) * (halfW + 50);
+        y = player.y + halfH + 20;
+      }
+
+      const t = randEnemyType(player.level);
+
+      const stageHpFactor = 1 + (stage - 1) * 0.3;
+      const stageSpeedFactor = 1 + (stage - 1) * 0.12;
+
+      const baseSpeed = (70 + t.corners * 10 + Math.random() * 20) * stageSpeedFactor;
+
+      let isElite = false;
+      const eliteChance = Math.min(0.03 + player.level * 0.002, 0.15);
+      if (Math.random() < eliteChance) isElite = true;
+
+      const hp = t.hp * stageHpFactor * (isElite ? 4 : 1);
+      const xp = t.xp * (isElite ? 4 : 1);
+
+      let behavior = 'chase';
+      if (player.level >= 6 && Math.random() < 0.25) {
+        behavior = 'zigzag';
+      }
+
+      enemies.push({
+        x,
+        y,
+        r: (14 + t.corners) * (isElite ? 1.3 : 1),
+        speed: baseSpeed * (isElite ? 1.1 : 1),
+        shape: t.type,
+        corners: t.corners,
+        hp,
+        maxHp: hp,
+        xp,
+        isElite,
+        behavior,
+        phase: Math.random() * Math.PI * 2
+      });
+    }
+  }
+
+  function shoot() {
+    if (enemies.length === 0) return;
+
+    let nearest = enemies[0];
+    let minDist2 =
+      (nearest.x - player.x) * (nearest.x - player.x) +
+      (nearest.y - player.y) * (nearest.y - player.y);
+
+    for (let i = 1; i < enemies.length; i++) {
+      const e = enemies[i];
+      const dx = e.x - player.x;
+      const dy = e.y - player.y;
+      const d2 = dx * dx + dy * dy;
+      if (d2 < minDist2) {
+        minDist2 = d2;
+        nearest = e;
+      }
+    }
+
+    const dx = nearest.x - player.x;
+    const dy = nearest.y - player.y;
+    const len = Math.hypot(dx, dy) || 1;
+    const baseAngle = Math.atan2(dy, dx);
+    const count = bulletCount;
+    const spread = Math.PI / 36;
+
+    for (let i = 0; i < count; i++) {
+      const offset = (i - (count - 1) / 2) * spread;
+      const angle = baseAngle + offset;
+      const vx = Math.cos(angle) * bulletSpeed;
+      const vy = Math.sin(angle) * bulletSpeed;
+
+      bullets.push({
+        x: player.x,
+        y: player.y,
+        vx,
+        vy,
+        r: bulletRadius,
+        pierceLeft: bulletPierce
+      });
+    }
+  }
+
+  function spawnXpOrbs(enemy) {
+    const count = Math.max(1, enemy.xp);
+    const redChance = enemy.isElite ? 0.6 : 0.25;
+    for (let i = 0; i < count; i++) {
+      let value = 1;
+      if (Math.random() < redChance) value = 2;
+      xpOrbs.push({
+        x: enemy.x + (Math.random() - 0.5) * 20,
+        y: enemy.y + (Math.random() - 0.5) * 20,
+        value,
+        magnet: false,
+        magnetSpeed: 0
+      });
+    }
+  }
+
+  function spawnHeartWorld() {
+    const angle = Math.random() * Math.PI * 2;
+    const dist = 400 + Math.random() * 800;
+    const hx = player.x + Math.cos(angle) * dist;
+    const hy = player.y + Math.sin(angle) * dist;
+    hearts.push({ x: hx, y: hy });
+  }
+
+  function spawnSplitBullets(x, y) {
+    if (splitLevel <= 0) return;
+    const num = 4 + 2 * (splitLevel - 1);
+    const speed = bulletSpeed * 0.7;
+    for (let i = 0; i < num; i++) {
+      const angle = (Math.PI * 2 * i) / num;
+      const vx = Math.cos(angle) * speed;
+      const vy = Math.sin(angle) * speed;
+      bullets.push({
+        x,
+        y,
+        vx,
+        vy,
+        r: Math.max(3, bulletRadius - 1),
+        pierceLeft: 0
+      });
+    }
+  }
+
+  function spawnChainLightning(sourceEnemy) {
+    if (chainLevel <= 0) return;
+    const jumps = 1 + chainLevel;
+    const radius = 220;
+    let currentX = sourceEnemy.x;
+    let currentY = sourceEnemy.y;
+    const hitSet = new Set();
+
+    for (let j = 0; j < jumps; j++) {
+      let best = null;
+      let bestD2 = radius * radius;
+      for (let k = 0; k < enemies.length; k++) {
+        const candidate = enemies[k];
+        if (candidate === sourceEnemy) continue;
+        if (hitSet.has(candidate)) continue;
+        const dx = candidate.x - currentX;
+        const dy = candidate.y - currentY;
+        const d2 = dx * dx + dy * dy;
+        if (d2 < bestD2) {
+          bestD2 = d2;
+          best = candidate;
+        }
+      }
+      if (!best) break;
+      hitSet.add(최고);
+
+      lightningArcs.push({
+        x1: currentX,
+        y1: currentY,
+        x2: best.x,
+        y2: best.y,
+        life: 0.12,
+        maxLife: 0.12
+      });
+
+      const dmg = 2;
+      best.hp -= dmg;
+      if (best.hp <= 0) {
+        if (!pendingChainKills.includes(최고)) {
+          pendingChainKills.push(최고);
+        }
+      }
+
+      currentX = best.x;
+      currentY = best.y;
+    }
+  }
+
+  function handleEnemyKilled(enemy, killedByBullet) {
+    score += enemy.xp;
+    spawnXpOrbs(enemy);
+    checkStageUp();
+
+    if (killedByBullet) {
+      spawnSplitBullets(enemy.x, enemy.y);
+      spawnChainLightning(enemy);
+    }
+  }
+
+  function loadBestScore() {
+    const saved = localStorage.getItem('survivalMiniBestScore');
+    if (saved !== null) {
+      const v = Number(saved);
+      if (!Number.isNaN(v)) bestScore = v;
+    }
+  }
+
+  function saveBestScore() {
+    localStorage.setItem('survivalMiniBestScore', String(bestScore));
+  }
+
+  function resetGame() {
+    player.x = 0;
+    player.y = 0;
+    player.maxHp = 3;
+    player.hp = 3;
+    player.level = 1;
+    player.xp = 0;
+    player.xpToNext = 5;
+
+    bulletSpeed = 400;
+    bulletRadius = 5;
+    xpGainMultiplier = 1;
+
+    bulletCount = 1;
+    bulletPierce = 0;
+    splitLevel = 0;
+    chainLevel = 0;
+
+    orbitBlades.length = 0;
+    slowAuraRadius = 0;
+
+    magnetRadius = 80;
+    magnetBaseSpeed = 80;
+    magnetMaxSpeed = 5000;
+    magnetAccel = 300;
+
+    enemies.length = 0;
+    bullets.length = 0;
+    xpOrbs.length = 0;
+    hearts.length = 0;
+    lightningArcs.length = 0;
+    pendingChainKills.length = 0;
+
+    score = 0;
+    stage = 1;
+    nextStageScore = 50;
+
+    enemySpawnInterval = 1000;
+    shootInterval = 400;
+    gameOver = false;
+
+    levelPopup.level = null;
+    levelPopup.time = 0;
+
+    stagePopup.stage = null;
+    stagePopup.time = 0;
+
+    screenShakeTime = 0;
+    screenShakeDuration = 0;
+    screenShakePower = 0;
+    hitFlashTime = 0;
+    hitFlashDuration = 0;
+
+    isChoosingUpgrade = false;
+    upgradeChoices = [];
+    upgradeChoiceRects = [];
+    upgradeSelectedIndex = 0;
+
+    heartSpawnTimer = 0;
+    heartSpawnInterval = 14;
+
+    skillCooldown = 0;
+    updateSkillButton();
+  }
+
+  function startGame() {
+    resetGame();
+    gameState = 'playing';
+  }
+
+  function useBomb() {
+    if (gameState !== 'playing' || gameOver || isChoosingUpgrade || helpVisible) return;
+    if (skillCooldown > 0) return;
+
+    const radius = 200;
+    for (let i = enemies.length - 1; i >= 0; i--) {
+      const e = enemies[i];
+      const dx = e.x - player.x;
+      const dy = e.y - player.y;
+      if (Math.hypot(dx, dy) <= radius) {
+        handleEnemyKilled(e, false);
+        enemies.splice(i, 1);
+      }
+    }
+
+    screenShakeTime = screenShakeDuration = 0.4;
+    screenShakePower = 10;
+    hitFlashTime = hitFlashDuration = 0.15;
+
+    skillCooldown = skillMaxCooldown;
+    updateSkillButton();
+  }
+
+  function attachSkillEvents() {
+    function handler(e) {
+      e.preventDefault();
+      useBomb();
+    }
+    if (skillBtn) {
+      skillBtn.addEventListener('click', handler);
+      skillBtn.addEventListener('touchstart', handler, { passive: false });
+    }
+
+    if (miniBtn) {
+      const mh = e => {
+        e.preventDefault();
+        minimapVisible = !minimapVisible;
+      };
+      miniBtn.addEventListener('click', mh);
+      miniBtn.addEventListener('touchstart', mh, { passive: false });
+    }
+
+    if (helpBtn) {
+      const hh = e => {
+        e.preventDefault();
+        helpVisible = !helpVisible;
+      };
+      helpBtn.addEventListener('click', hh);
+      helpBtn.addEventListener('touchstart', hh, { passive: false });
+    }
+  }
+  attachSkillEvents();
+
+  function updateSkillButton() {
+    if (!skillBtn) return;
+    if (skillCooldown <= 0) {
+      skillBtn.classList.remove('cooldown');
+      skillBtn.textContent = '💥';
+    } else {
+      skillBtn.classList.add('cooldown');
+      skillBtn.textContent = skillCooldown.toFixed(1);
+    }
+  }
+
+  function update(dt) {
+    if (gameState !== 'playing') return;
+
+    if (helpVisible) return;
+
+    for (let i = lightningArcs.length - 1; i >= 0; i--) {
+      const arc = lightningArcs[i];
+      arc.life -= dt;
+      if (arc.life <= 0) {
+        lightningArcs.splice(i, 1);
+      }
+    }
+
+    if (!gameOver) {
+      if (skillCooldown > 0) {
+        skillCooldown -= dt;
+        if (skillCooldown < 0) skillCooldown = 0;
+        updateSkillButton();
+      }
+    }
+
+    if (screenShakeTime > 0) {
+      screenShakeTime -= dt;
+      if (screenShakeTime < 0) screenShakeTime = 0;
+    }
+    if (hitFlashTime > 0) {
+      hitFlashTime -= dt;
+      if (hitFlashTime < 0) hitFlashTime = 0;
+    }
+    if (levelPopup.time > 0) {
+      levelPopup.time -= dt;
+      if (levelPopup.time < 0) levelPopup.time = 0;
+    }
+    if (stagePopup.time > 0) {
+      stagePopup.time -= dt;
+      if (stagePopup.time < 0) stagePopup.time = 0;
+    }
+
+    if (gameOver || isChoosingUpgrade) return;
+
+    heartSpawnTimer += dt;
+    if (heartSpawnTimer >= heartSpawnInterval) {
+      heartSpawnTimer = 0;
+      spawnHeartWorld();
+      heartSpawnInterval = 12 + Math.random() * 8;
+    }
+
+    let moveX = 0, moveY = 0;
+    if (keys['a'] || keys['A'] || keys['ArrowLeft'] || touchMove.left) moveX -= 1;
+    if (keys['d'] || keys['D'] || keys['ArrowRight'] || touchMove.right) moveX += 1;
+    if (keys['w'] || keys['W'] || keys['ArrowUp'] || touchMove.up) moveY -= 1;
+    if (keys['s'] || keys['S'] || keys['ArrowDown'] || touchMove.down) moveY += 1;
+
+    let len = Math.hypot(moveX, moveY);
+    if (len > 0) {
+      moveX /= len;
+      moveY /= len;
+    }
+
+    player.x += moveX * player.speed * dt;
+    player.y += moveY * player.speed * dt;
+
+    for (let i = 0; i < orbitBlades.length; i++) {
+      const b = orbitBlades[i];
+      b.angle += b.speed * dt;
+      b.x = player.x + Math.cos(b.angle) * b.radius;
+      b.y = player.y + Math.sin(b.angle) * b.radius;
+    }
+
+    enemySpawnTimer += dt * 1000;
+    if (enemySpawnTimer >= enemySpawnInterval) {
+      enemySpawnTimer = 0;
+      spawnEnemy();
+      if (enemySpawnInterval > 300) {
+        enemySpawnInterval -= 10;
+      }
+    }
+
+    shootTimer += dt * 1000;
+    if (shootTimer >= shootInterval) {
+      shootTimer = 0;
+      shoot();
+    }
+
+    for (let i = 0; i < enemies.length; i++) {
+      const e = enemies[i];
+      const dx = player.x - e.x;
+      const dy = player.y - e.y;
+      const baseLen = Math.hypot(dx, dy) || 1;
+      const ux = dx / baseLen;
+      const uy = dy / baseLen;
+
+      const distToPlayer = baseLen;
+      let moveSpeed = e.speed;
+      if (slowAuraRadius > 0 && distToPlayer < slowAuraRadius) {
+        moveSpeed *= slowAuraFactor;
+      }
+
+      if (e.behavior === 'zigzag') {
+        e.phase += dt * 6;
+        const perpX = -uy;
+        const perpY = ux;
+        const offset = Math.sin(e.phase) * 0.7;
+        let vx = ux + perpX * offset;
+        let vy = uy + perpY * offset;
+        const l2 = Math.hypot(vx, vy) || 1;
+        vx /= l2;
+        vy /= l2;
+        e.x += vx * moveSpeed * dt;
+        e.y += vy * moveSpeed * dt;
+      } else {
+        e.x += ux * moveSpeed * dt;
+        e.y += uy * moveSpeed * dt;
+      }
+    }
+
+    for (let i = enemies.length - 1; i >= 0; i--) {
+      const e = enemies[i];
+      let dead = false;
+      for (let k = 0; k < orbitBlades.length; k++) {
+        const b = orbitBlades[k];
+        const dx = e.x - b.x;
+        const dy = e.y - b.y;
+        if (Math.hypot(dx, dy) < e.r + b.r) {
+          e.hp -= b.dmg;
+          if (e.hp <= 0) {
+            handleEnemyKilled(e, false);
+            enemies.splice(i, 1);
+            dead = true;
+          }
+          break;
+        }
+      }
+      if (dead) continue;
+    }
+
+    for (let i = 0; i < bullets.length; i++) {
+      const b = bullets[i];
+      b.x += b.vx * dt;
+      b.y += b.vy * dt;
+    }
+
+    for (let i = enemies.length - 1; i >= 0; i--) {
+      const e = enemies[i];
+      let dead = false;
+      for (let j = bullets.length - 1; j >= 0; j--) {
+        const b = bullets[j];
+        const dx = e.x - b.x;
+        const dy = e.y - b.y;
+        if (Math.hypot(dx, dy) < e.r + b.r) {
+          e.hp -= 1;
+          if (b.pierceLeft > 0) {
+            b.pierceLeft -= 1;
+          } else {
+            bullets.splice(j, 1);
+          }
+          if (e.hp <= 0) {
+            handleEnemyKilled(e, true);
+            enemies.splice(i, 1);
+            dead = true;
+          }
+          break;
+        }
+      }
+      if (dead) continue;
+    }
+
+    for (let idx = 0; idx < pendingChainKills.length; idx++) {
+      const enemyObj = pendingChainKills[idx];
+      const eIndex = enemies.indexOf(enemyObj);
+      if (eIndex !== -1) {
+        handleEnemyKilled(enemyObj, false);
+        enemies.splice(eIndex, 1);
+      }
+    }
+    pendingChainKills.length = 0;
+
+    for (let i = bullets.length - 1; i >= 0; i--) {
+      const b = bullets[i];
+      const dx = b.x - player.x;
+      const dy = b.y - player.y;
+      if (Math.hypot(dx, dy) > 2000) {
+        bullets.splice(i, 1);
+      }
+    }
+
+    for (let i = enemies.length - 1; i >= 0; i--) {
+      const e = enemies[i];
+      const dx = e.x - player.x;
+      const dy = e.y - player.y;
+      if (Math.hypot(dx, dy) < e.r + player.r) {
+        enemies.splice(i, 1);
+        player.hp -= 1;
+
+        screenShakeTime = screenShakeDuration = 0.25;
+        screenShakePower = 6;
+        hitFlashTime = hitFlashDuration = 0.1;
+
+        if (player.hp <= 0) {
+          gameOver = true;
+          gameState = 'gameover';
+
+          if (score > bestScore) {
+            bestScore = score;
+            saveBestScore();
+          }
+          break;
+        }
+      }
+    }
+
+    for (let i = xpOrbs.length - 1; i >= 0; i--) {
+      const o = xpOrbs[i];
+
+      let dx = player.x - o.x;
+      let dy = player.y - o.y;
+      let dist = Math.hypot(dx, dy) || 1;
+
+      if (!o.magnet && dist < magnetRadius) {
+        o.magnet = true;
+        o.magnetSpeed = magnetBaseSpeed;
+      }
+
+      if (o.magnet && dist > 1) {
+        o.magnetSpeed += magnetAccel * dt;
+        if (o.magnetSpeed > magnetMaxSpeed) {
+          o.magnetSpeed = magnetMaxSpeed;
+        }
+        const pull = o.magnetSpeed * dt;
+        const ratio = Math.min(pull / dist, 1);
+        o.x += dx * ratio;
+        o.y += dy * ratio;
+      }
+
+      dx = player.x - o.x;
+      dy = player.y - o.y;
+      dist = Math.hypot(dx, dy);
+      if (dist < player.r + 8) {
+        const gain = Math.round(o.value * xpGainMultiplier);
+        player.xp += gain;
+        xpOrbs.splice(i, 1);
+        checkLevelUp();
+      }
+    }
+
+    for (let i = hearts.length - 1; i >= 0; i--) {
+      const h = hearts[i];
+      const dx = h.x - player.x;
+      const dy = h.y - player.y;
+      if (Math.hypot(dx, dy) < player.r + 10) {
+        if (player.hp < player.maxHp) {
+          player.hp += 1;
+        }
+        hearts.splice(i, 1);
+      }
+    }
+  }
+
+  function drawCircle(x, y, r) {
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  function drawPolygon(x, y, r, sides, rotation) {
+    if (rotation === undefined) rotation = 0;
+    if (sides < 3) {
+      drawCircle(x, y, r);
+      return;
+    }
+    ctx.beginPath();
+    for (let i = 0; i < sides; i++) {
+      const angle = rotation + i * (Math.PI * 2 / sides);
+      const px = x + Math.cos(angle) * r;
+      const py = y + Math.sin(angle) * r;
+      if (i === 0) ctx.moveTo(px, py);
+      else ctx.lineTo(px, py);
+    }
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  function drawStarShape(x, y, r, points, rotation) {
+    if (points === undefined) points = 5;
+    if (rotation === undefined) rotation = 0;
+    const innerR = r * 0.5;
+    ctx.beginPath();
+    for (let i = 0; i < points * 2; i++) {
+      const useR = (i % 2 === 0) ? r : innerR;
+      const angle = rotation + i * Math.PI / points;
+      const px = x + Math.cos(angle) * useR;
+      const py = y + Math.sin(angle) * useR;
+      if (i === 0) ctx.moveTo(px, py);
+      else ctx.lineTo(px, py);
+    }
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  function drawHeart(x, y, size) {
+    ctx.save();
+    ctx.translate(x, y);
+    const s = size / 2;
+    ctx.scale(s, s);
+    ctx.beginPath();
+    ctx.moveTo(0, 0.4);
+    ctx.bezierCurveTo(-0.9, -0.2, -0.7, -1.0, 0, -0.5);
+    ctx.bezierCurveTo(0.7, -1.0, 0.9, -0.2, 0, 0.4);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+  }
+
+  function drawBullet(b) {
+    const speedMag = Math.hypot(b.vx, b.vy) || 1;
+    const dirX = b.vx / speedMag;
+    const dirY = b.vy / speedMag;
+
+    ctx.save();
+
+    if (b.pierceLeft > 0) {
+      ctx.fillStyle = '#80deea';
+      ctx.shadowColor = '#80deea';
+      ctx.shadowBlur = 12;
+
+      const tailLen = 10;
+      const tx = b.x - dirX * tailLen;
+      const ty = b.y - dirY * tailLen;
+
+      ctx.beginPath();
+      ctx.moveTo(tx, ty);
+      ctx.lineTo(b.x + dirX * 2, b.y + dirY * 2);
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = '#4dd0e1';
+      ctx.stroke();
+
+      drawCircle(b.x, b.y, b.r + 1);
+    } else if (bulletCount >= 3) {
+      ctx.fillStyle = '#ffb74d';
+      ctx.shadowColor = '#ffb74d';
+      ctx.shadowBlur = 8;
+      drawCircle(b.x, b.y, b.r + 1);
+    } else if (bulletCount === 2) {
+      ctx.fillStyle = '#ffcc80';
+      ctx.shadowColor = '#ffcc80';
+      ctx.shadowBlur = 6;
+      drawCircle(b.x, b.y, b.r);
+    } else {
+      ctx.fillStyle = '#ffeb3b';
+      ctx.shadowColor = '#ffeb3b';
+      ctx.shadowBlur = 6;
+      drawCircle(b.x, b.y, b.r);
+    }
+
+    ctx.restore();
+  }
+
+  function drawCrescentBlade(b) {
+    ctx.save();
+    ctx.translate(b.x, b.y);
+
+    ctx.rotate(b.angle + Math.PI);
+
+    ctx.fillStyle = '#ffb74d';
+    ctx.strokeStyle = '#ffe082';
+    ctx.lineWidth = 2;
+    ctx.shadowColor = '#ffc107';
+    ctx.shadowBlur = 12;
+
+    const R = b.r;
+    ctx.beginPath();
+    ctx.arc(0, 0, R, Math.PI * 0.25, Math.PI * 1.75);
+    ctx.arc(-R * 0.45, 0, R * 0.7, Math.PI * 1.75, Math.PI * 0.25, true);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.restore();
+  }
+
+  function drawEnemy(e, time) {
+    if (e.isElite) {
+      ctx.save();
+      ctx.shadowColor = '#ffeb3b';
+      ctx.shadowBlur = 15;
+      ctx.lineWidth = 2;
+      switch (e.shape) {
+        case 'circle':
+          ctx.fillStyle = '#ff5252';
+          drawCircle(e.x, e.y, e.r);
+          break;
+        case 'triangle':
+          ctx.fillStyle = '#ffb74d';
+          drawPolygon(e.x, e.y, e.r, 3, time * 0.002);
+          break;
+        case 'square':
+          ctx.fillStyle = '#ce93d8';
+          drawPolygon(e.x, e.y, e.r, 4, time * 0.002);
+          break;
+        case 'star':
+          ctx.fillStyle = '#ffd600';
+          drawStarShape(e.x, e.y, e.r, 5, time * 0.002);
+          break;
+        default:
+          ctx.fillStyle = '#f44336';
+          drawCircle(e.x, e.y, e.r);
+      }
+      ctx.restore();
+    } else {
+      switch (e.shape) {
+        case 'circle':
+          ctx.fillStyle = '#ff6666';
+          drawCircle(e.x, e.y, e.r);
+          break;
+        case 'triangle':
+          ctx.fillStyle = '#ffa726';
+          drawPolygon(e.x, e.y, e.r, 3, time * 0.002);
+          break;
+        case 'square':
+          ctx.fillStyle = '#ab47bc';
+          drawPolygon(e.x, e.y, e.r, 4, time * 0.002);
+          break;
+        case 'star':
+          ctx.fillStyle = '#ffd600';
+          drawStarShape(e.x, e.y, e.r, 5, time * 0.002);
+          break;
+        default:
+          ctx.fillStyle = '#f44336';
+          drawCircle(e.x, e.y, e.r);
+      }
+    }
+  }
+
+  function drawBackground() {
+    ctx.fillStyle = '#000000';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+  }
+
+  function drawLevelPopup() {
+    if (levelPopup.time <= 0 || levelPopup.level == null) return;
+    const t = levelPopup.time / levelPopup.duration;
+    const alpha = t;
+    const text = 'LEVEL ' + levelPopup.level;
+
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    const fontSize = 72;
+    ctx.font = '900 ' + fontSize + 'px system-ui, sans-serif';
+
+    const metrics = ctx.measureText(text);
+    const textWidth = metrics.width;
+    const x = (canvas.width - textWidth) / 2;
+    const y = canvas.height * 0.42;
+
+    ctx.lineWidth = 6;
+    ctx.strokeStyle = '#000000';
+    ctx.strokeText(text, x, y);
+
+    ctx.fillStyle = '#ffffff';
+    ctx.fillText(text, x, y);
+    ctx.restore();
+  }
+
+  function drawStagePopup() {
+    if (stagePopup.time <= 0 || stagePopup.stage == null) return;
+    const t = stagePopup.time / stagePopup.duration;
+    const alpha = t;
+    const text = 'STAGE ' + stagePopup.stage;
+
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    const fontSize = 70;
+    ctx.font = '900 ' + fontSize + 'px system-ui, sans-serif';
+
+    const metrics = ctx.measureText(text);
+    const textWidth = metrics.width;
+    const x = (canvas.width - textWidth) / 2;
+    const y = canvas.height * 0.58;
+
+    ctx.lineWidth = 6;
+    ctx.strokeStyle = '#000000';
+    ctx.strokeText(text, x, y);
+
+    ctx.fillStyle = '#ffeb3b';
+    ctx.fillText(text, x, y);
+    ctx.restore();
+  }
+
+  function wrapTextLines(text, maxWidth) {
+    const words = text.split(' ');
+    const lines = [];
+    let current = '';
+    for (let i = 0; i < words.length; i++) {
+      const test = current ? current + ' ' + words[i] : words[i];
+      const w = ctx.measureText(test).width;
+      if (w > maxWidth && current) {
+        lines.push(current);
+        current = words[i];
+      } else {
+        current = test;
+      }
+    }
+    if (current) lines.push(current);
+    return lines;
+  }
+
+  function drawUpgradeMenu() {
+    if (!isChoosingUpgrade) return;
+
+    ctx.save();
+    ctx.fillStyle = 'rgba(0,0,0,0.7)';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    const cardCount = upgradeChoices.length;
+    const cardWidth = Math.min(240, canvas.width * 0.8 / cardCount);
+    const cardHeight = 140;
+    const totalWidth = cardWidth * cardCount + (cardCount - 1) * 20;
+    const startX = (canvas.width - totalWidth) / 2;
+    const startY = canvas.height * 0.25;
+
+    upgradeChoiceRects = [];
+    ctx.font = '20px sans-serif';
+
+    for (let i = 0; i < cardCount; i++) {
+      const c = upgradeChoices[i];
+      const x = startX + i * (cardWidth + 20);
+      const y = startY;
+
+      const selected = (i === upgradeSelectedIndex);
+
+      ctx.fillStyle = selected ? 'rgba(60,60,90,0.98)' : 'rgba(40,40,40,0.95)';
+      ctx.fillRect(x, y, cardWidth, cardHeight);
+
+      ctx.strokeStyle = selected ? '#00e5ff' : '#ffffff';
+      ctx.lineWidth = selected ? 3 : 2;
+      ctx.strokeRect(x, y, cardWidth, cardHeight);
+
+      ctx.fillStyle = '#00e5ff';
+      ctx.font = 'bold 18px sans-serif';
+      ctx.fillText(c.name, x + 12, y + 32);
+
+      ctx.fillStyle = '#ffffff';
+      ctx.font = '14px sans-serif';
+      const lines = wrapTextLines(c.desc, cardWidth - 24);
+      for (let li = 0; li < lines.length; li++) {
+        ctx.fillText(lines[li], x + 12, y + 60 + li * 18);
+      }
+
+      upgradeChoiceRects.push({ x, y, w: cardWidth, h: cardHeight, index: i });
+    }
+
+    ctx.fillStyle = '#ffffff';
+    ctx.font = '18px sans-serif';
+    const msg = '레벨 업! 방향키(←/→) 또는 A/D, 스페이스로 선택';
+    const w = ctx.measureText(msg).width;
+    ctx.fillText(msg, (canvas.width - w) / 2, startY - 20);
+
+    ctx.restore();
+  }
+
+  function drawMiniMap() {
+    if (!minimapVisible) return;
+
+    const minSide = Math.min(canvas.width, canvas.height);
+    const size = minSide * 0.8;
+    const mapW = size;
+    const mapH = size;
+    const x = (canvas.width - mapW) / 2;
+    const y = (canvas.height - mapH) / 2;
+
+    const centerX = x + mapW / 2;
+    const centerY = y + mapH / 2;
+    const radius = mapW / 2 - 10;
+    const range = 800;
+    const scale = radius / range;
+
+    ctx.save();
+    ctx.globalAlpha = 0.8;
+    ctx.fillStyle = 'rgba(0,0,0,0.6)';
+    ctx.fillRect(x, y, mapW, mapH);
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(x, y, mapW, mapH);
+
+    ctx.beginPath();
+    ctx.arc(centerX, centerY, radius, 0, Math.PI * 2);
+    ctx.stroke();
+
+    ctx.fillStyle = '#4caf50';
+    ctx.beginPath();
+    ctx.arc(centerX, centerY, 5, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = '#ff5252';
+    enemies.forEach(e => {
+      const dx = e.x - player.x;
+      const dy = e.y - player.y;
+      const dist = Math.hypot(dx, dy);
+      if (dist > range) return;
+      const px = centerX + dx * scale;
+      const py = centerY + dy * scale;
+      ctx.fillRect(px - 2, py - 2, 4, 4);
+    });
+
+    ctx.fillStyle = '#00e5ff';
+    xpOrbs.forEach(o => {
+      const dx = o.x - player.x;
+      const dy = o.y - player.y;
+      const dist = Math.hypot(dx, dy);
+      if (dist > range) return;
+      const px = centerX + dx * scale;
+      const py = centerY + dy * scale;
+      ctx.fillRect(px - 1.5, py - 1.5, 3, 3);
+    });
+
+    ctx.fillStyle = '#ff80ab';
+    hearts.forEach(h => {
+      const dx = h.x - player.x;
+      const dy = h.y - player.y;
+      const dist = Math.hypot(dx, dy);
+      if (dist > range) return;
+      const px = centerX + dx * scale;
+      const py = centerY + dy * scale;
+      ctx.beginPath();
+      ctx.arc(px, py, 3, 0, Math.PI * 2);
+      ctx.fill();
+    });
+
+    ctx.fillStyle = '#ffffff';
+    ctx.font = '12px sans-serif';
+    const label = 'M 또는 버튼: 미니맵 토글';
+    const lw = ctx.measureText(label).width;
+    ctx.fillText(label, centerX - lw / 2, y + mapH - 8);
+
+    ctx.restore();
+  }
+
+  function drawLightningArcs() {
+    ctx.save();
+    for (const arc of lightningArcs) {
+      const t = arc.life / arc.maxLife;
+      ctx.globalAlpha = Math.max(0, t);
+      ctx.strokeStyle = '#b3e5fc';
+      ctx.lineWidth = 2;
+      ctx.shadowColor = '#e1f5fe';
+      ctx.shadowBlur = 10;
+
+      ctx.beginPath();
+      ctx.moveTo(arc.x1, arc.y1);
+      ctx.lineTo(arc.x2, arc.y2);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  function drawStatusPanel() {
+    const w = 260;
+    const h = 120;
+    const x = 10;
+    const y = 10;
+
+    ctx.save();
+    ctx.fillStyle = 'rgba(0,0,0,0.6)';
+    ctx.fillRect(x, y, w, h);
+    ctx.strokeStyle = 'rgba(255,255,255,0.4)';
+    ctx.strokeRect(x, y, w, h);
+
+    ctx.fillStyle = '#fff';
+    ctx.font = '14px sans-serif';
+    ctx.fillText(`Stage: ${stage}   Score: ${score}`, x + 10, y + 25);
+    ctx.fillText(`Lv: ${player.level}   HP: ${player.hp} / ${player.maxHp}`, x + 10, y + 45);
+    ctx.fillText(`다음 Stage 점수: ${nextStageScore}`, x + 10, y + 65);
+
+    const barX = x + 10;
+    const barY = y + 75;
+    const barW = w - 20;
+    const barH = 12;
+    const ratio = Math.min(player.xp / player.xpToNext, 1);
+
+    ctx.fillStyle = '#444';
+    ctx.fillRect(barX, barY, barW, barH);
+
+    ctx.fillStyle = '#00c3ff';
+    ctx.fillRect(barX, barY, barW * ratio, barH);
+
+    ctx.fillStyle = '#fff';
+    ctx.font = '12px sans-serif';
+    ctx.fillText(`XP: ${player.xp} / ${player.xpToNext}`, barX, barY + 24);
+
+    ctx.fillText('키: WASD/방향키, B, M, H', x + 10, y + h - 10);
+    ctx.restore();
+  }
+
+  function drawHelpOverlay() {
+    if (!helpVisible) return;
+
+    ctx.save();
+    ctx.fillStyle = 'rgba(0,0,0,0.75)';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    const cx = canvas.width / 2;
+    const cy = canvas.height / 2;
+    const w = Math.min(480, canvas.width * 0.9);
+    const h = Math.min(380, canvas.height * 0.8);
+    const x = cx - w / 2;
+    const y = cy - h / 2;
+
+    ctx.fillStyle = 'rgba(20,20,20,0.9)';
+    ctx.fillRect(x, y, w, h);
+    ctx.strokeStyle = '#ffffff';
+    ctx.strokeRect(x, y, w, h);
+
+    ctx.fillStyle = '#00e5ff';
+    ctx.font = 'bold 20px sans-serif';
+    ctx.fillText('도움말 (H 또는 버튼)', x + 20, y + 30);
+
+    ctx.fillStyle = '#ffffff';
+    ctx.font = '14px sans-serif';
+    let lineY = y + 60;
+    const lineGap = 20;
+
+    const lines = [
+      '- 이동: WASD / 방향키 / 화면 터치 조이스틱',
+      '- 폭발 스킬: B 키 / 💥 버튼',
+      '- 레벨업 선택: ←/→ 또는 A/D, Space',
+      '- 미니맵: M 키 / M 버튼',
+      '- 도움말: H 키 / H 버튼',
+      '',
+      '- 파란 구슬: 기본 경험치 (x1)',
+      '- 빨간 구슬: 2배 경험치 (x2)',
+      '- 자석에 걸린 구슬은 끝까지 따라옴',
+      '',
+      '- 하트(체력): 맵 어딘가에서 자연 생성, 줍으면 HP +1',
+      '',
+      '- Lv(레벨): 플레이어 능력 업그레이드',
+      '- Stage(스테이지): 적 처치 점수에 따라 상승,',
+      '  스테이지가 오를수록 적 체력/속도가 증가함.',
+      '',
+      '- 게임 오버: R / Space / Enter / 화면 터치로 재시작'
+    ];
+
+    for (const text of lines) {
+      ctx.fillText(text, x + 20, lineY);
+      lineY += lineGap;
+      if (lineY > y + h - 20) break;
+    }
+
+    ctx.restore();
+  }
+
+  function drawMenu() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    if (titleImageLoaded) {
+      const imgW = titleImage.width;
+      const imgH = titleImage.height;
+      const scale = Math.max(canvas.width / imgW, canvas.height / imgH);
+      const drawW = imgW * scale;
+      const drawH = imgH * scale;
+      const dx = (canvas.width  - drawW) / 2;
+      const dy = (canvas.height - drawH) / 2;
+      ctx.drawImage(titleImage, dx, dy, drawW, drawH);
+    } else {
+      drawBackground();
+      const grad = ctx.createRadialGradient(
+        canvas.width / 2, canvas.height / 2, 0,
+        canvas.width / 2, canvas.height / 2, canvas.width / 2
+      );
+      grad.addColorStop(0, 'rgba(255,255,255,0.06)');
+      grad.addColorStop(1, 'rgba(0,0,0,0.0)');
+      ctx.fillStyle = grad;
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+    }
+
+    ctx.save();
+    ctx.fillStyle = 'rgba(0,0,0,0.45)';
+    ctx.fillRect(0, canvas.height * 0.16, canvas.width, 120);
+
+    ctx.textAlign = 'center';
+
+    ctx.font = '900 54px system-ui, sans-serif';
+    ctx.fillStyle = '#e3f2fd';
+    ctx.shadowColor = '#00e5ff';
+    ctx.shadowBlur = 18;
+    ctx.fillText('SURVIVAL MINI', canvas.width / 2, canvas.height * 0.23);
+
+    ctx.font = '300 24px system-ui, sans-serif';
+    ctx.fillStyle = '#80deea';
+    ctx.shadowBlur = 6;
+    ctx.fillText('Shape Bullet Hell', canvas.width / 2, canvas.height * 0.27);
+
+    ctx.restore();
+
+    ctx.save();
+    ctx.fillStyle = 'rgba(0,0,0,0.6)';
+    const panelW = 260;
+    const panelH = 70;
+    const panelX = 20;
+    const panelY = canvas.height * 0.38;
+    ctx.fillRect(panelX, panelY, panelW, panelH);
+    ctx.strokeStyle = 'rgba(255,255,255,0.4)';
+    ctx.strokeRect(panelX, panelY, panelW, panelH);
+
+    ctx.fillStyle = '#ffffff';
+    ctx.font = '18px system-ui, sans-serif';
+    ctx.fillText(`Best Score: ${bestScore}`, panelX + 14, panelY + 28);
+    ctx.font = '14px system-ui, sans-serif';
+    ctx.fillText('이번 플레이 스코어도 여기 갱신됨', panelX + 14, panelY + 48);
+    ctx.restore();
+
+    ctx.save();
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#ffffff';
+    ctx.font = '18px system-ui, sans-serif';
+    ctx.fillText('첫 입력: 브금 활성화, 두 번째 입력: 게임 시작', canvas.width / 2, canvas.height * 0.72);
+    ctx.font = '16px system-ui, sans-serif';
+    ctx.fillText('클릭 / 터치 / 아무 키 입력', canvas.width / 2, canvas.height * 0.77);
+    ctx.restore();
+  }
+
+  function draw() {
+    if (gameState === 'menu') {
+      drawMenu();
+      return;
+    }
+
+    drawBackground();
+
+    ctx.save();
+
+    let shakeX = 0;
+    let shakeY = 0;
+    if (screenShakeTime > 0 && screenShakeDuration > 0) {
+      const t = screenShakeTime / screenShakeDuration;
+      const mag = screenShakePower * t;
+      shakeX = (Math.random() * 2 - 1) * mag;
+      shakeY = (Math.random() * 2 - 1) * mag;
+    }
+    ctx.translate(shakeX, shakeY);
+
+    ctx.translate(canvas.width / 2 - player.x, canvas.height / 2 - player.y);
+
+    if (slowAuraRadius > 0) {
+      ctx.save();
+      ctx.globalAlpha = 0.12;
+      ctx.strokeStyle = '#80d8ff';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(player.x, player.y, slowAuraRadius, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    ctx.fillStyle = '#4caf50';
+    drawCircle(player.x, player.y, player.r);
+
+    for (let i = 0; i < orbitBlades.length; i++) {
+      drawCrescentBlade(orbitBlades[i]);
+    }
+
+    const now = performance.now();
+    for (let i = 0; i < enemies.length; i++) {
+      drawEnemy(enemies[i], now);
+    }
+
+    drawLightningArcs();
+
+    for (let i = 0; i < bullets.length; i++) {
+      drawBullet(bullets[i]);
+    }
+
+    for (let i = 0; i < xpOrbs.length; i++) {
+      const o = xpOrbs[i];
+      if (o.value > 1) {
+        ctx.fillStyle = '#ff5252';
+      } else {
+        ctx.fillStyle = '#00e5ff';
+      }
+      drawCircle(o.x, o.y, o.value > 1 ? 6 : 5);
+    }
+
+    ctx.fillStyle = '#ff4081';
+    ctx.shadowColor = '#ff80ab';
+    ctx.shadowBlur = 8;
+    for (let i = 0; i < hearts.length; i++) {
+      const h = hearts[i];
+      drawHeart(h.x, h.y, 55);
+    }
+    ctx.shadowBlur = 0;
+
+    ctx.restore();
+
+    if (hitFlashTime > 0 && hitFlashDuration > 0) {
+      const t = hitFlashTime / hitFlashDuration;
+      ctx.save();
+      ctx.globalAlpha = t * 0.5;
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.restore();
+    }
+
+    drawStatusPanel();
+
+    drawLevelPopup();
+    drawStagePopup();
+
+    drawMiniMap();
+    drawUpgradeMenu();
+    drawHelpOverlay();
+
+    if (gameState === 'gameover') {
+      ctx.fillStyle = '#fff';
+      ctx.font = '40px sans-serif';
+      const msg = 'GAME OVER';
+      const msg2 = 'R / Space / Enter / 화면 터치로 재시작';
+      ctx.textAlign = 'center';
+      ctx.fillText(msg, canvas.width / 2, canvas.height / 2);
+      ctx.font = '20px sans-serif';
+      ctx.fillText(msg2, canvas.width / 2, canvas.height / 2 + 40);
+      ctx.textAlign = 'start';
+    }
+  }
+
+  function handleCanvasSelectUpgrade(x, y) {
+    if (!isChoosingUpgrade) return;
+    for (const rect of upgradeChoiceRects) {
+      if (
+        x >= rect.x && x <= rect.x + rect.w &&
+        y >= rect.y && y <= rect.y + rect.h
+      ) {
+        const choice = upgradeChoices[rect.index];
+        applyUpgrade(choice);
+        break;
+      }
+    }
+  }
+
+  canvas.addEventListener('click', e => {
+    const rect = canvas.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+
+    if (gameState === 'menu') {
+      if (!audioReady) {
+        audioReady = true;
+        playTitleBgm();
+      } else {
+        startGame();
+        playGameBgm();
+      }
+      return;
+    }
+
+    if (gameState === 'gameover') {
+      resetGame();
+      gameOver = false;
+      gameState = 'menu';
+      stopAllBgm();
+      audioReady = true;
+      playTitleBgm();
+      return;
+    }
+
+    if (isChoosingUpgrade) {
+      handleCanvasSelectUpgrade(x, y);
+      return;
+    }
+  });
+
+  canvas.addEventListener('touchstart', e => {
+    const rect = canvas.getBoundingClientRect();
+    const t = e.touches[0];
+    const x = t.clientX - rect.left;
+    const y = t.clientY - rect.top;
+
+    if (gameState === 'menu') {
+      e.preventDefault();
+      if (!audioReady) {
+        audioReady = true;
+        playTitleBgm();
+      } else {
+        startGame();
+        playGameBgm();
+      }
+      return;
+    }
+
+    if (gameState === 'gameover') {
+      e.preventDefault();
+      resetGame();
+      gameOver = false;
+      gameState = 'menu';
+      stopAllBgm();
+      audioReady = true;
+      playTitleBgm();
+      return;
+    }
+
+    if (isChoosingUpgrade) {
+      e.preventDefault();
+      handleCanvasSelectUpgrade(x, y);
+      return;
+    }
+  }, { passive: true });
+
+  function loop(timestamp) {
+    const dt = (timestamp - lastTime) / 1000;
+    lastTime = timestamp;
+    update(dt);
+    draw();
+    requestAnimationFrame(loop);
+  }
+
+  loadBestScore();
+  resetGame();
+  gameState = 'menu';
+  requestAnimationFrame(loop);
+</script>
+</body>
+</html>
