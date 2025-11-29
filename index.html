@@ -15,7 +15,9 @@
       display: block;
     }
 
-    /* 모바일용 조이스틱 */
+    /* =========================
+       모바일용 조이스틱
+    ========================== */
     #joystick-base, #joystick-stick {
       position: fixed;
       border-radius: 50%;
@@ -33,7 +35,9 @@
       border: 2px solid rgba(255,255,255,0.6);
     }
 
-    /* 상단 왼쪽 UI 버튼 묶음 */
+    /* =========================
+       상단 왼쪽 UI 버튼 묶음
+    ========================== */
     #top-left-ui {
       position: fixed;
       left: 20px;
@@ -88,6 +92,13 @@
 <audio id="bgm-game"  src="assets/bgm/game.mp3"  loop></audio>
 
 <script>
+(() => {
+  'use strict';
+
+  /* =========================================================
+   *  1. 캔버스 / 리사이즈
+   * ======================================================= */
+
   const canvas = document.getElementById('game');
   const ctx = canvas.getContext('2d');
 
@@ -98,15 +109,24 @@
   window.addEventListener('resize', resize);
   resize();
 
-  // ====== 게임 상태 ======
+  /* =========================================================
+   *  2. 게임 상태 / 전역 플래그
+   *     - 여기서 상태/플래그를 한눈에 파악
+   * ======================================================= */
+
   // 'menu' | 'playing' | 'gameover'
   let gameState = 'menu';
   let gameOver = false;
 
-  // 첫 입력에서만 오디오 언락용
+  // 오디오 초기 입력 언락
   let audioReady = false;
 
-  const keys = {};
+  const keys = {};              // 키보드 입력 상태
+  const touchMove = {           // 조이스틱 방향 상태
+    up: false, down: false,
+    left: false, right: false
+  };
+
   let minimapVisible = false;
   let isChoosingUpgrade = false;
   let upgradeChoices = [];
@@ -114,7 +134,39 @@
   let upgradeSelectedIndex = 0;
   let helpVisible = false;
 
-  // ====== 오디오 컨트롤 ======
+  // 스코어 관련
+  let score = 0;
+  let bestScore = 0;
+
+  // 스테이지 관련
+  let stage = 1;
+  let nextStageScore = 50;
+
+  // 타이머들
+  let lastTime = performance.now();
+  let enemySpawnTimer = 0;
+  let enemySpawnInterval = 1000;   // ms 단위
+  let shootTimer = 0;
+  let shootInterval = 400;         // ms 단위
+  let heartSpawnTimer = 0;
+  let heartSpawnInterval = 14;     // 초 단위
+
+  // 화면 효과
+  let screenShakeTime = 0;
+  let screenShakeDuration = 0;
+  let screenShakePower = 0;
+
+  let hitFlashTime = 0;
+  let hitFlashDuration = 0;
+
+  // 팝업 (레벨업 / 스테이지업)
+  const levelPopup = { level: null, time: 0, duration: 1.2 };
+  const stagePopup = { stage: null, time: 0, duration: 1.2 };
+
+  /* =========================================================
+   *  3. 오디오 / 타이틀 이미지
+   * ======================================================= */
+
   const bgmTitle = document.getElementById('bgm-title');
   const bgmGame  = document.getElementById('bgm-game');
   let bgmTitleStarted = false;
@@ -163,243 +215,17 @@
     });
   }
 
-  // ====== 타이틀 이미지 로드 ======
+  // 타이틀 배경 이미지
   const titleImage = new Image();
   let titleImageLoaded = false;
-  titleImage.src = 'assets/img/title-survival-mini.png';   // 실제 파일 이름에 맞춤
+  titleImage.src = 'assets/img/title-survival-mini.png';
   titleImage.onload = () => { titleImageLoaded = true; };
 
-  // ====== 입력 처리 ======
-  window.addEventListener('keydown', e => {
-    const key = e.key;
+  /* =========================================================
+   *  4. 플레이어 / 탄 / 경험치 / 적 / 기타 엔티티
+   *     - 실제 게임 오브젝트 상태들
+   * ======================================================= */
 
-    // --- 메뉴 상태 ---
-    if (gameState === 'menu') {
-      // 첫 입력: 오디오 언락 + 타이틀 브금 시작
-      if (!audioReady) {
-        audioReady = true;
-        playTitleBgm();
-      } else {
-        // 두 번째 입력부터: 게임 시작
-        startGame();
-        playGameBgm();
-      }
-      e.preventDefault();
-      return;
-    }
-
-    // --- 게임오버 상태 ---
-    if (gameState === 'gameover') {
-      if (key === 'r' || key === 'R' || key === ' ' || e.code === 'Space' || key === 'Enter') {
-        resetGame();
-        gameOver = false;
-        gameState = 'menu';
-        stopAllBgm();
-        audioReady = true;
-        playTitleBgm();
-      }
-      e.preventDefault();
-      return;
-    }
-
-    // 여기부터는 playing 상태
-    // 업그레이드 선택 중 방향키 자동 반복 방지
-    if (
-      isChoosingUpgrade &&
-      e.repeat &&
-      (
-        key === 'ArrowLeft' || key === 'ArrowRight' ||
-        key === 'a' || key === 'A' ||
-        key === 'd' || key === 'D'
-      )
-    ) {
-      e.preventDefault();
-      return;
-    }
-
-    keys[key] = true;
-
-    // H: 도움말 토글
-    if (key === 'h' || key === 'H') {
-      helpVisible = !helpVisible;
-      e.preventDefault();
-      return;
-    }
-
-    // B: 폭탄 사용
-    if ((key === 'b' || key === 'B') && !gameOver && !isChoosingUpgrade && !helpVisible) {
-      useBomb();
-      e.preventDefault();
-      return;
-    }
-
-    // 업글 선택 중 방향키 & 스페이스 처리
-    if (isChoosingUpgrade) {
-      if (key === 'ArrowLeft' || key === 'a' || key === 'A') {
-        if (upgradeChoices.length > 0) {
-          upgradeSelectedIndex =
-            (upgradeSelectedIndex - 1 + upgradeChoices.length) % upgradeChoices.length;
-        }
-        e.preventDefault();
-        return;
-      }
-
-      if (key === 'ArrowRight' || key === 'd' || key === 'D') {
-        if (upgradeChoices.length > 0) {
-          upgradeSelectedIndex =
-            (upgradeSelectedIndex + 1) % upgradeChoices.length;
-        }
-        e.preventDefault();
-        return;
-      }
-
-      if (key === ' ' || e.code === 'Space') {
-        if (upgradeChoices.length > 0) {
-          const choice = upgradeChoices[upgradeSelectedIndex];
-          applyUpgrade(choice);
-        }
-        e.preventDefault();
-        return;
-      }
-
-      return;
-    }
-
-    // M: 미니맵 토글
-    if (key === 'm' || key === 'M') {
-      minimapVisible = !minimapVisible;
-      return;
-    }
-  });
-
-  window.addEventListener('keyup', e => {
-    keys[e.key] = false;
-  });
-
-  // ====== 모바일/조이스틱 이동 상태 ======
-  const touchMove = { up: false, down: false, left: false, right: false };
-
-  const joystickBase = document.getElementById('joystick-base');
-  const joystickStick = document.getElementById('joystick-stick');
-  let joystickActive = false;
-  let joystickId = null;
-  let joystickCenterX = 0;
-  let joystickCenterY = 0;
-  const joystickRadius = 60;
-
-  function resetTouchMove() {
-    touchMove.up = touchMove.down = touchMove.left = touchMove.right = false;
-  }
-
-  function updateTouchMoveFromVector(dx, dy) {
-    resetTouchMove();
-    const len = Math.hypot(dx, dy);
-    if (len < 10) return;
-
-    const nx = dx / len;
-    const ny = dy / len;
-    const threshold = 0.35;
-
-    if (nx <= -threshold) touchMove.left = true;
-    if (nx >= threshold) touchMove.right = true;
-    if (ny <= -threshold) touchMove.up = true;
-    if (ny >= threshold) touchMove.down = true;
-  }
-
-  function showJoystick(x, y) {
-    joystickCenterX = x;
-    joystickCenterY = y;
-
-    const baseSize = joystickRadius * 2;
-    joystickBase.style.width = baseSize + 'px';
-    joystickBase.style.height = baseSize + 'px';
-    joystickBase.style.left = (x - joystickRadius) + 'px';
-    joystickBase.style.top = (y - joystickRadius) + 'px';
-    joystickBase.style.opacity = 0.4;
-
-    const stickSize = joystickRadius * 1.2;
-    joystickStick.style.width = stickSize + 'px';
-    joystickStick.style.height = stickSize + 'px';
-    joystickStick.style.left = (x - stickSize / 2) + 'px';
-    joystickStick.style.top = (y - stickSize / 2) + 'px';
-    joystickStick.style.opacity = 0.7;
-  }
-
-  function moveJoystick(x, y) {
-    const dx = x - joystickCenterX;
-    const dy = y - joystickCenterY;
-    const len = Math.hypot(dx, dy);
-    let clampedX = dx;
-    let clampedY = dy;
-    if (len > joystickRadius) {
-      const ratio = joystickRadius / (len || 1);
-      clampedX *= ratio;
-      clampedY *= ratio;
-    }
-
-    const stickSize = joystickRadius * 1.2;
-    joystickStick.style.left =
-      (joystickCenterX + clampedX - stickSize / 2) + 'px';
-    joystickStick.style.top =
-      (joystickCenterY + clampedY - stickSize / 2) + 'px';
-
-    updateTouchMoveFromVector(dx, dy);
-  }
-
-  function hideJoystick() {
-    joystickBase.style.opacity = 0;
-    joystickStick.style.opacity = 0;
-    joystickActive = false;
-    joystickId = null;
-    resetTouchMove();
-  }
-
-  function handleJoystickTouchStart(e) {
-    if (gameState !== 'playing' || gameOver || isChoosingUpgrade || helpVisible) return;
-
-    for (let i = 0; i < e.changedTouches.length; i++) {
-      const t = e.changedTouches[i];
-      if (!joystickActive) {
-        joystickActive = true;
-        joystickId = t.identifier;
-        showJoystick(t.clientX, t.clientY);
-        moveJoystick(t.clientX, t.clientY);
-        e.preventDefault();
-        return;
-      }
-    }
-  }
-
-  function handleJoystickTouchMove(e) {
-    if (!joystickActive) return;
-    for (let i = 0; i < e.changedTouches.length; i++) {
-      const t = e.changedTouches[i];
-      if (t.identifier === joystickId) {
-        moveJoystick(t.clientX, t.clientY);
-        e.preventDefault();
-        return;
-      }
-    }
-  }
-
-  function handleJoystickTouchEnd(e) {
-    if (!joystickActive) return;
-    for (let i = 0; i < e.changedTouches.length; i++) {
-      const t = e.changedTouches[i];
-      if (t.identifier === joystickId) {
-        hideJoystick();
-        e.preventDefault();
-        return;
-      }
-    }
-  }
-
-  canvas.addEventListener('touchstart', handleJoystickTouchStart, { passive: false });
-  canvas.addEventListener('touchmove', handleJoystickTouchMove, { passive: false });
-  canvas.addEventListener('touchend', handleJoystickTouchEnd, { passive: false });
-  canvas.addEventListener('touchcancel', handleJoystickTouchEnd, { passive: false });
-
-  // ====== 플레이어 & 스탯 ======
   const player = {
     x: 0,
     y: 0,
@@ -412,6 +238,7 @@
     xpToNext: 5
   };
 
+  // 탄 관련
   let bulletSpeed = 400;
   let bulletRadius = 5;
   let xpGainMultiplier = 1;
@@ -421,6 +248,7 @@
   let splitLevel = 0;
   let chainLevel = 0;
 
+  // 회전 칼날, 슬로우 오라
   const orbitBlades = [];
   let slowAuraRadius = 0;
   const slowAuraFactor = 0.6;
@@ -431,6 +259,7 @@
   let magnetMaxSpeed = 5000;
   let magnetAccel = 300;
 
+  // 게임 오브젝트 배열들
   const enemies = [];
   const bullets = [];
   const xpOrbs = [];
@@ -438,39 +267,18 @@
   const lightningArcs = [];
   const pendingChainKills = [];
 
-  let lastTime = performance.now();
-  let enemySpawnTimer = 0;
-  let enemySpawnInterval = 1000;
-  let shootTimer = 0;
-  let shootInterval = 400;
-  let score = 0;
-  let bestScore = 0;
-
-  let stage = 1;
-  let nextStageScore = 50;
-
-  let heartSpawnTimer = 0;
-  let heartSpawnInterval = 14;
-
-  // 레벨/스테이지 팝업
-  const levelPopup = { level: null, time: 0, duration: 1.2 };
-  const stagePopup = { stage: null, time: 0, duration: 1.2 };
-
-  let screenShakeTime = 0;
-  let screenShakeDuration = 0;
-  let screenShakePower = 0;
-
-  let hitFlashTime = 0;
-  let hitFlashDuration = 0;
-
-  // 버튼
+  // 스킬 버튼 및 쿨타임
   const skillBtn = document.getElementById('skill-btn');
-  const miniBtn = document.getElementById('mini-btn');
-  const helpBtn = document.getElementById('help-btn');
+  const miniBtn  = document.getElementById('mini-btn');
+  const helpBtn  = document.getElementById('help-btn');
   let skillCooldown = 0;
   const skillMaxCooldown = 5;
 
-  // 적 타입
+  /* =========================================================
+   *  5. 적 타입 / 업그레이드 정의
+   *     - 난이도 조정은 이쪽 숫자부터 만지는 게 깔끔
+   * ======================================================= */
+
   const enemyConfigs = [
     { type: 'circle',   corners: 0, hp: 1, xp: 1, weight: 60, unlockLevel: 1  },
     { type: 'triangle', corners: 3, hp: 2, xp: 2, weight: 25, unlockLevel: 6  },
@@ -478,7 +286,6 @@
     { type: 'star',     corners: 5, hp: 4, xp: 4, weight: 5,  unlockLevel: 16 }
   ];
 
-  // 업그레이드 목록
   const allUpgrades = [
     {
       id: 'hp',
@@ -596,6 +403,10 @@
     }
   ];
 
+  /* =========================================================
+   *  6. 유틸 함수 (샘플링, 텍스트 래핑 등)
+   * ======================================================= */
+
   function randomSampleNoRepeat(arr, count) {
     const pool = arr.slice();
     const res = [];
@@ -607,6 +418,80 @@
     }
     return res;
   }
+
+  function wrapTextLines(text, maxWidth) {
+    const words = text.split(' ');
+    const lines = [];
+    let current = '';
+    for (let i = 0; i < words.length; i++) {
+      const test = current ? current + ' ' + words[i] : words[i];
+      const w = ctx.measureText(test).width;
+      if (w > maxWidth && current) {
+        lines.push(current);
+        current = words[i];
+      } else {
+        current = test;
+      }
+    }
+    if (current) lines.push(current);
+    return lines;
+  }
+
+  function drawCircle(x, y, r) {
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  function drawPolygon(x, y, r, sides, rotation = 0) {
+    if (sides < 3) {
+      drawCircle(x, y, r);
+      return;
+    }
+    ctx.beginPath();
+    for (let i = 0; i < sides; i++) {
+      const angle = rotation + i * (Math.PI * 2 / sides);
+      const px = x + Math.cos(angle) * r;
+      const py = y + Math.sin(angle) * r;
+      if (i === 0) ctx.moveTo(px, py);
+      else ctx.lineTo(px, py);
+    }
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  function drawStarShape(x, y, r, points = 5, rotation = 0) {
+    const innerR = r * 0.5;
+    ctx.beginPath();
+    for (let i = 0; i < points * 2; i++) {
+      const useR = (i % 2 === 0) ? r : innerR;
+      const angle = rotation + i * Math.PI / points;
+      const px = x + Math.cos(angle) * useR;
+      const py = y + Math.sin(angle) * useR;
+      if (i === 0) ctx.moveTo(px, py);
+      else ctx.lineTo(px, py);
+    }
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  function drawHeart(x, y, size) {
+    ctx.save();
+    ctx.translate(x, y);
+    const s = size / 2;
+    ctx.scale(s, s);
+    ctx.beginPath();
+    ctx.moveTo(0, 0.4);
+    ctx.bezierCurveTo(-0.9, -0.2, -0.7, -1.0, 0, -0.5);
+    ctx.bezierCurveTo(0.7, -1.0, 0.9, -0.2, 0, 0.4);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+  }
+
+  /* =========================================================
+   *  7. 레벨업 / 스테이지업 / 업그레이드 처리
+   * ======================================================= */
 
   function openUpgradeChoices() {
     isChoosingUpgrade = true;
@@ -649,6 +534,10 @@
       stagePopup.time = stagePopup.duration;
     }
   }
+
+  /* =========================================================
+   *  8. 적 생성 / 탄 발사 / 경험치 / 체인 라이트닝
+   * ======================================================= */
 
   function randEnemyType(level) {
     const available = enemyConfigs.filter(t => level >= t.unlockLevel);
@@ -838,7 +727,7 @@
         }
       }
       if (!best) break;
-      hitSet.add(최고);
+      hitSet.add(best);
 
       lightningArcs.push({
         x1: currentX,
@@ -852,8 +741,8 @@
       const dmg = 2;
       best.hp -= dmg;
       if (best.hp <= 0) {
-        if (!pendingChainKills.includes(최고)) {
-          pendingChainKills.push(최고);
+        if (!pendingChainKills.includes(best)) {
+          pendingChainKills.push(best);
         }
       }
 
@@ -873,6 +762,10 @@
     }
   }
 
+  /* =========================================================
+   *  9. 로컬 스토리지(베스트 스코어)
+   * ======================================================= */
+
   function loadBestScore() {
     const saved = localStorage.getItem('survivalMiniBestScore');
     if (saved !== null) {
@@ -884,6 +777,10 @@
   function saveBestScore() {
     localStorage.setItem('survivalMiniBestScore', String(bestScore));
   }
+
+  /* =========================================================
+   * 10. 게임 초기화 / 시작 / 폭탄 스킬
+   * ======================================================= */
 
   function resetGame() {
     player.x = 0;
@@ -978,14 +875,29 @@
     updateSkillButton();
   }
 
+  /* =========================================================
+   * 11. UI 버튼 / 스킬 버튼 이벤트
+   * ======================================================= */
+
+  function updateSkillButton() {
+    if (!skillBtn) return;
+    if (skillCooldown <= 0) {
+      skillBtn.classList.remove('cooldown');
+      skillBtn.textContent = '💥';
+    } else {
+      skillBtn.classList.add('cooldown');
+      skillBtn.textContent = skillCooldown.toFixed(1);
+    }
+  }
+
   function attachSkillEvents() {
-    function handler(e) {
+    function bombHandler(e) {
       e.preventDefault();
       useBomb();
     }
     if (skillBtn) {
-      skillBtn.addEventListener('click', handler);
-      skillBtn.addEventListener('touchstart', handler, { passive: false });
+      skillBtn.addEventListener('click', bombHandler);
+      skillBtn.addEventListener('touchstart', bombHandler, { passive: false });
     }
 
     if (miniBtn) {
@@ -1008,22 +920,251 @@
   }
   attachSkillEvents();
 
-  function updateSkillButton() {
-    if (!skillBtn) return;
-    if (skillCooldown <= 0) {
-      skillBtn.classList.remove('cooldown');
-      skillBtn.textContent = '💥';
-    } else {
-      skillBtn.classList.add('cooldown');
-      skillBtn.textContent = skillCooldown.toFixed(1);
+  /* =========================================================
+   * 12. 조이스틱 / 터치 입력
+   * ======================================================= */
+
+  const joystickBase = document.getElementById('joystick-base');
+  const joystickStick = document.getElementById('joystick-stick');
+  let joystickActive = false;
+  let joystickId = null;
+  let joystickCenterX = 0;
+  let joystickCenterY = 0;
+  const joystickRadius = 60;
+
+  function resetTouchMove() {
+    touchMove.up = touchMove.down = touchMove.left = touchMove.right = false;
+  }
+
+  function updateTouchMoveFromVector(dx, dy) {
+    resetTouchMove();
+    const len = Math.hypot(dx, dy);
+    if (len < 10) return;
+
+    const nx = dx / len;
+    const ny = dy / len;
+    const threshold = 0.35;
+
+    if (nx <= -threshold) touchMove.left = true;
+    if (nx >= threshold)  touchMove.right = true;
+    if (ny <= -threshold) touchMove.up = true;
+    if (ny >= threshold)  touchMove.down = true;
+  }
+
+  function showJoystick(x, y) {
+    joystickCenterX = x;
+    joystickCenterY = y;
+
+    const baseSize = joystickRadius * 2;
+    joystickBase.style.width  = baseSize + 'px';
+    joystickBase.style.height = baseSize + 'px';
+    joystickBase.style.left   = (x - joystickRadius) + 'px';
+    joystickBase.style.top    = (y - joystickRadius) + 'px';
+    joystickBase.style.opacity = 0.4;
+
+    const stickSize = joystickRadius * 1.2;
+    joystickStick.style.width  = stickSize + 'px';
+    joystickStick.style.height = stickSize + 'px';
+    joystickStick.style.left   = (x - stickSize / 2) + 'px';
+    joystickStick.style.top    = (y - stickSize / 2) + 'px';
+    joystickStick.style.opacity = 0.7;
+  }
+
+  function moveJoystick(x, y) {
+    const dx = x - joystickCenterX;
+    const dy = y - joystickCenterY;
+    const len = Math.hypot(dx, dy);
+    let clampedX = dx;
+    let clampedY = dy;
+    if (len > joystickRadius) {
+      const ratio = joystickRadius / (len || 1);
+      clampedX *= ratio;
+      clampedY *= ratio;
+    }
+
+    const stickSize = joystickRadius * 1.2;
+    joystickStick.style.left =
+      (joystickCenterX + clampedX - stickSize / 2) + 'px';
+    joystickStick.style.top =
+      (joystickCenterY + clampedY - stickSize / 2) + 'px';
+
+    updateTouchMoveFromVector(dx, dy);
+  }
+
+  function hideJoystick() {
+    joystickBase.style.opacity = 0;
+    joystickStick.style.opacity = 0;
+    joystickActive = false;
+    joystickId = null;
+    resetTouchMove();
+  }
+
+  function handleJoystickTouchStart(e) {
+    if (gameState !== 'playing' || gameOver || isChoosingUpgrade || helpVisible) return;
+
+    for (let i = 0; i < e.changedTouches.length; i++) {
+      const t = e.changedTouches[i];
+      if (!joystickActive) {
+        joystickActive = true;
+        joystickId = t.identifier;
+        showJoystick(t.clientX, t.clientY);
+        moveJoystick(t.clientX, t.clientY);
+        e.preventDefault();
+        return;
+      }
     }
   }
+
+  function handleJoystickTouchMove(e) {
+    if (!joystickActive) return;
+    for (let i = 0; i < e.changedTouches.length; i++) {
+      const t = e.changedTouches[i];
+      if (t.identifier === joystickId) {
+        moveJoystick(t.clientX, t.clientY);
+        e.preventDefault();
+        return;
+      }
+    }
+  }
+
+  function handleJoystickTouchEnd(e) {
+    if (!joystickActive) return;
+    for (let i = 0; i < e.changedTouches.length; i++) {
+      const t = e.changedTouches[i];
+      if (t.identifier === joystickId) {
+        hideJoystick();
+        e.preventDefault();
+        return;
+      }
+    }
+  }
+
+  canvas.addEventListener('touchstart', handleJoystickTouchStart, { passive: false });
+  canvas.addEventListener('touchmove',  handleJoystickTouchMove,  { passive: false });
+  canvas.addEventListener('touchend',   handleJoystickTouchEnd,   { passive: false });
+  canvas.addEventListener('touchcancel',handleJoystickTouchEnd,   { passive: false });
+
+  /* =========================================================
+   * 13. 키보드 입력 처리
+   * ======================================================= */
+
+  window.addEventListener('keydown', e => {
+    const key = e.key;
+
+    // --- 메뉴 상태 ---
+    if (gameState === 'menu') {
+      // 첫 입력: 오디오 언락 + 타이틀 브금 시작
+      if (!audioReady) {
+        audioReady = true;
+        playTitleBgm();
+      } else {
+        // 두 번째 입력부터: 게임 시작
+        startGame();
+        playGameBgm();
+      }
+      e.preventDefault();
+      return;
+    }
+
+    // --- 게임오버 상태 ---
+    if (gameState === 'gameover') {
+      if (key === 'r' || key === 'R' || key === ' ' || e.code === 'Space' || key === 'Enter') {
+        resetGame();
+        gameOver = false;
+        gameState = 'menu';
+        stopAllBgm();
+        audioReady = true;
+        playTitleBgm();
+      }
+      e.preventDefault();
+      return;
+    }
+
+    // 여기부터는 playing 상태
+
+    // 업그레이드 선택 중 방향키 자동 반복 방지
+    if (
+      isChoosingUpgrade &&
+      e.repeat &&
+      (
+        key === 'ArrowLeft'  || key === 'ArrowRight' ||
+        key === 'a' || key === 'A' ||
+        key === 'd' || key === 'D'
+      )
+    ) {
+      e.preventDefault();
+      return;
+    }
+
+    keys[key] = true;
+
+    // H: 도움말 토글
+    if (key === 'h' || key === 'H') {
+      helpVisible = !helpVisible;
+      e.preventDefault();
+      return;
+    }
+
+    // B: 폭탄 사용
+    if ((key === 'b' || key === 'B') && !gameOver && !isChoosingUpgrade && !helpVisible) {
+      useBomb();
+      e.preventDefault();
+      return;
+    }
+
+    // 업그레이드 선택 중 방향키 & 스페이스 처리
+    if (isChoosingUpgrade) {
+      if (key === 'ArrowLeft' || key === 'a' || key === 'A') {
+        if (upgradeChoices.length > 0) {
+          upgradeSelectedIndex =
+            (upgradeSelectedIndex - 1 + upgradeChoices.length) % upgradeChoices.length;
+        }
+        e.preventDefault();
+        return;
+      }
+
+      if (key === 'ArrowRight' || key === 'd' || key === 'D') {
+        if (upgradeChoices.length > 0) {
+          upgradeSelectedIndex =
+            (upgradeSelectedIndex + 1) % upgradeChoices.length;
+        }
+        e.preventDefault();
+        return;
+      }
+
+      if (key === ' ' || e.code === 'Space') {
+        if (upgradeChoices.length > 0) {
+          const choice = upgradeChoices[upgradeSelectedIndex];
+          applyUpgrade(choice);
+        }
+        e.preventDefault();
+        return;
+      }
+
+      return;
+    }
+
+    // M: 미니맵 토글
+    if (key === 'm' || key === 'M') {
+      minimapVisible = !minimapVisible;
+      return;
+    }
+  });
+
+  window.addEventListener('keyup', e => {
+    keys[e.key] = false;
+  });
+
+  /* =========================================================
+   * 14. 게임 로직 업데이트
+   * ======================================================= */
 
   function update(dt) {
     if (gameState !== 'playing') return;
 
     if (helpVisible) return;
 
+    // 번개 수명
     for (let i = lightningArcs.length - 1; i >= 0; i--) {
       const arc = lightningArcs[i];
       arc.life -= dt;
@@ -1032,6 +1173,7 @@
       }
     }
 
+    // 스킬 쿨타임
     if (!gameOver) {
       if (skillCooldown > 0) {
         skillCooldown -= dt;
@@ -1040,6 +1182,7 @@
       }
     }
 
+    // 화면 효과 타이머
     if (screenShakeTime > 0) {
       screenShakeTime -= dt;
       if (screenShakeTime < 0) screenShakeTime = 0;
@@ -1059,6 +1202,7 @@
 
     if (gameOver || isChoosingUpgrade) return;
 
+    // 하트 스폰
     heartSpawnTimer += dt;
     if (heartSpawnTimer >= heartSpawnInterval) {
       heartSpawnTimer = 0;
@@ -1066,11 +1210,12 @@
       heartSpawnInterval = 12 + Math.random() * 8;
     }
 
+    // 플레이어 이동
     let moveX = 0, moveY = 0;
-    if (keys['a'] || keys['A'] || keys['ArrowLeft'] || touchMove.left) moveX -= 1;
+    if (keys['a'] || keys['A'] || keys['ArrowLeft']  || touchMove.left)  moveX -= 1;
     if (keys['d'] || keys['D'] || keys['ArrowRight'] || touchMove.right) moveX += 1;
-    if (keys['w'] || keys['W'] || keys['ArrowUp'] || touchMove.up) moveY -= 1;
-    if (keys['s'] || keys['S'] || keys['ArrowDown'] || touchMove.down) moveY += 1;
+    if (keys['w'] || keys['W'] || keys['ArrowUp']    || touchMove.up)    moveY -= 1;
+    if (keys['s'] || keys['S'] || keys['ArrowDown']  || touchMove.down)  moveY += 1;
 
     let len = Math.hypot(moveX, moveY);
     if (len > 0) {
@@ -1081,6 +1226,7 @@
     player.x += moveX * player.speed * dt;
     player.y += moveY * player.speed * dt;
 
+    // 회전 칼날 위치 업데이트
     for (let i = 0; i < orbitBlades.length; i++) {
       const b = orbitBlades[i];
       b.angle += b.speed * dt;
@@ -1088,6 +1234,7 @@
       b.y = player.y + Math.sin(b.angle) * b.radius;
     }
 
+    // 적 스폰
     enemySpawnTimer += dt * 1000;
     if (enemySpawnTimer >= enemySpawnInterval) {
       enemySpawnTimer = 0;
@@ -1097,12 +1244,14 @@
       }
     }
 
+    // 자동 사격
     shootTimer += dt * 1000;
     if (shootTimer >= shootInterval) {
       shootTimer = 0;
       shoot();
     }
 
+    // 적 이동
     for (let i = 0; i < enemies.length; i++) {
       const e = enemies[i];
       const dx = player.x - e.x;
@@ -1135,6 +1284,7 @@
       }
     }
 
+    // 회전 칼날 vs 적 충돌
     for (let i = enemies.length - 1; i >= 0; i--) {
       const e = enemies[i];
       let dead = false;
@@ -1155,12 +1305,14 @@
       if (dead) continue;
     }
 
+    // 탄 이동
     for (let i = 0; i < bullets.length; i++) {
       const b = bullets[i];
       b.x += b.vx * dt;
       b.y += b.vy * dt;
     }
 
+    // 탄 vs 적 충돌
     for (let i = enemies.length - 1; i >= 0; i--) {
       const e = enemies[i];
       let dead = false;
@@ -1186,6 +1338,7 @@
       if (dead) continue;
     }
 
+    // 체인 라이트닝으로 죽은 적 처리
     for (let idx = 0; idx < pendingChainKills.length; idx++) {
       const enemyObj = pendingChainKills[idx];
       const eIndex = enemies.indexOf(enemyObj);
@@ -1196,6 +1349,7 @@
     }
     pendingChainKills.length = 0;
 
+    // 화면 밖으로 너무 멀리 나간 탄 제거
     for (let i = bullets.length - 1; i >= 0; i--) {
       const b = bullets[i];
       const dx = b.x - player.x;
@@ -1205,6 +1359,7 @@
       }
     }
 
+    // 적 vs 플레이어 충돌
     for (let i = enemies.length - 1; i >= 0; i--) {
       const e = enemies[i];
       const dx = e.x - player.x;
@@ -1230,6 +1385,7 @@
       }
     }
 
+    // 경험치 구슬 / 자석 처리
     for (let i = xpOrbs.length - 1; i >= 0; i--) {
       const o = xpOrbs[i];
 
@@ -1264,6 +1420,7 @@
       }
     }
 
+    // 하트 획득
     for (let i = hearts.length - 1; i >= 0; i--) {
       const h = hearts[i];
       const dx = h.x - player.x;
@@ -1277,60 +1434,10 @@
     }
   }
 
-  function drawCircle(x, y, r) {
-    ctx.beginPath();
-    ctx.arc(x, y, r, 0, Math.PI * 2);
-    ctx.fill();
-  }
-
-  function drawPolygon(x, y, r, sides, rotation) {
-    if (rotation === undefined) rotation = 0;
-    if (sides < 3) {
-      drawCircle(x, y, r);
-      return;
-    }
-    ctx.beginPath();
-    for (let i = 0; i < sides; i++) {
-      const angle = rotation + i * (Math.PI * 2 / sides);
-      const px = x + Math.cos(angle) * r;
-      const py = y + Math.sin(angle) * r;
-      if (i === 0) ctx.moveTo(px, py);
-      else ctx.lineTo(px, py);
-    }
-    ctx.closePath();
-    ctx.fill();
-  }
-
-  function drawStarShape(x, y, r, points, rotation) {
-    if (points === undefined) points = 5;
-    if (rotation === undefined) rotation = 0;
-    const innerR = r * 0.5;
-    ctx.beginPath();
-    for (let i = 0; i < points * 2; i++) {
-      const useR = (i % 2 === 0) ? r : innerR;
-      const angle = rotation + i * Math.PI / points;
-      const px = x + Math.cos(angle) * useR;
-      const py = y + Math.sin(angle) * useR;
-      if (i === 0) ctx.moveTo(px, py);
-      else ctx.lineTo(px, py);
-    }
-    ctx.closePath();
-    ctx.fill();
-  }
-
-  function drawHeart(x, y, size) {
-    ctx.save();
-    ctx.translate(x, y);
-    const s = size / 2;
-    ctx.scale(s, s);
-    ctx.beginPath();
-    ctx.moveTo(0, 0.4);
-    ctx.bezierCurveTo(-0.9, -0.2, -0.7, -1.0, 0, -0.5);
-    ctx.bezierCurveTo(0.7, -1.0, 0.9, -0.2, 0, 0.4);
-    ctx.closePath();
-    ctx.fill();
-    ctx.restore();
-  }
+  /* =========================================================
+   * 15. 그리기 전용 함수들
+   *     - 배경 / 플레이어 / 적 / UI / 팝업 등
+   * ======================================================= */
 
   function drawBullet(b) {
     const speedMag = Math.hypot(b.vx, b.vy) || 1;
@@ -1457,6 +1564,62 @@
     ctx.fillRect(0, 0, canvas.width, canvas.height);
   }
 
+  function drawLightningArcs() {
+    ctx.save();
+    for (const arc of lightningArcs) {
+      const t = arc.life / arc.maxLife;
+      ctx.globalAlpha = Math.max(0, t);
+      ctx.strokeStyle = '#b3e5fc';
+      ctx.lineWidth = 2;
+      ctx.shadowColor = '#e1f5fe';
+      ctx.shadowBlur = 10;
+
+      ctx.beginPath();
+      ctx.moveTo(arc.x1, arc.y1);
+      ctx.lineTo(arc.x2, arc.y2);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  function drawStatusPanel() {
+    const w = 260;
+    const h = 120;
+    const x = 10;
+    const y = 10;
+
+    ctx.save();
+    ctx.fillStyle = 'rgba(0,0,0,0.6)';
+    ctx.fillRect(x, y, w, h);
+    ctx.strokeStyle = 'rgba(255,255,255,0.4)';
+    ctx.strokeRect(x, y, w, h);
+
+    ctx.fillStyle = '#fff';
+    ctx.font = '14px sans-serif';
+    ctx.fillText(`Stage: ${stage}   Score: ${score}`, x + 10, y + 25);
+    ctx.fillText(`Lv: ${player.level}   HP: ${player.hp} / ${player.maxHp}`, x + 10, y + 45);
+    ctx.fillText(`다음 Stage 점수: ${nextStageScore}`, x + 10, y + 65);
+
+    const barX = x + 10;
+    const barY = y + 75;
+    const barW = w - 20;
+    const barH = 12;
+    const ratio = Math.min(player.xp / player.xpToNext, 1);
+
+    ctx.fillStyle = '#444';
+    ctx.fillRect(barX, barY, barW, barH);
+
+    ctx.fillStyle = '#00c3ff';
+    ctx.fillRect(barX, barY, barW * ratio, barH);
+
+    ctx.fillStyle = '#fff';
+    ctx.font = '12px sans-serif';
+    ctx.fillText(`XP: ${player.xp} / ${player.xpToNext}`, barX, barY + 24);
+
+    ctx.fillText('키: WASD/방향키, B, M, H', x + 10, y + h - 10);
+    ctx.restore();
+  }
+
   function drawLevelPopup() {
     if (levelPopup.time <= 0 || levelPopup.level == null) return;
     const t = levelPopup.time / levelPopup.duration;
@@ -1505,24 +1668,6 @@
     ctx.fillStyle = '#ffeb3b';
     ctx.fillText(text, x, y);
     ctx.restore();
-  }
-
-  function wrapTextLines(text, maxWidth) {
-    const words = text.split(' ');
-    const lines = [];
-    let current = '';
-    for (let i = 0; i < words.length; i++) {
-      const test = current ? current + ' ' + words[i] : words[i];
-      const w = ctx.measureText(test).width;
-      if (w > maxWidth && current) {
-        lines.push(current);
-        current = words[i];
-      } else {
-        current = test;
-      }
-    }
-    if (current) lines.push(current);
-    return lines;
   }
 
   function drawUpgradeMenu() {
@@ -1607,11 +1752,13 @@
     ctx.arc(centerX, centerY, radius, 0, Math.PI * 2);
     ctx.stroke();
 
+    // 플레이어
     ctx.fillStyle = '#4caf50';
     ctx.beginPath();
     ctx.arc(centerX, centerY, 5, 0, Math.PI * 2);
     ctx.fill();
 
+    // 적
     ctx.fillStyle = '#ff5252';
     enemies.forEach(e => {
       const dx = e.x - player.x;
@@ -1623,6 +1770,7 @@
       ctx.fillRect(px - 2, py - 2, 4, 4);
     });
 
+    // 경험치
     ctx.fillStyle = '#00e5ff';
     xpOrbs.forEach(o => {
       const dx = o.x - player.x;
@@ -1634,6 +1782,7 @@
       ctx.fillRect(px - 1.5, py - 1.5, 3, 3);
     });
 
+    // 하트
     ctx.fillStyle = '#ff80ab';
     hearts.forEach(h => {
       const dx = h.x - player.x;
@@ -1653,62 +1802,6 @@
     const lw = ctx.measureText(label).width;
     ctx.fillText(label, centerX - lw / 2, y + mapH - 8);
 
-    ctx.restore();
-  }
-
-  function drawLightningArcs() {
-    ctx.save();
-    for (const arc of lightningArcs) {
-      const t = arc.life / arc.maxLife;
-      ctx.globalAlpha = Math.max(0, t);
-      ctx.strokeStyle = '#b3e5fc';
-      ctx.lineWidth = 2;
-      ctx.shadowColor = '#e1f5fe';
-      ctx.shadowBlur = 10;
-
-      ctx.beginPath();
-      ctx.moveTo(arc.x1, arc.y1);
-      ctx.lineTo(arc.x2, arc.y2);
-      ctx.stroke();
-    }
-    ctx.restore();
-  }
-
-  function drawStatusPanel() {
-    const w = 260;
-    const h = 120;
-    const x = 10;
-    const y = 10;
-
-    ctx.save();
-    ctx.fillStyle = 'rgba(0,0,0,0.6)';
-    ctx.fillRect(x, y, w, h);
-    ctx.strokeStyle = 'rgba(255,255,255,0.4)';
-    ctx.strokeRect(x, y, w, h);
-
-    ctx.fillStyle = '#fff';
-    ctx.font = '14px sans-serif';
-    ctx.fillText(`Stage: ${stage}   Score: ${score}`, x + 10, y + 25);
-    ctx.fillText(`Lv: ${player.level}   HP: ${player.hp} / ${player.maxHp}`, x + 10, y + 45);
-    ctx.fillText(`다음 Stage 점수: ${nextStageScore}`, x + 10, y + 65);
-
-    const barX = x + 10;
-    const barY = y + 75;
-    const barW = w - 20;
-    const barH = 12;
-    const ratio = Math.min(player.xp / player.xpToNext, 1);
-
-    ctx.fillStyle = '#444';
-    ctx.fillRect(barX, barY, barW, barH);
-
-    ctx.fillStyle = '#00c3ff';
-    ctx.fillRect(barX, barY, barW * ratio, barH);
-
-    ctx.fillStyle = '#fff';
-    ctx.font = '12px sans-serif';
-    ctx.fillText(`XP: ${player.xp} / ${player.xpToNext}`, barX, barY + 24);
-
-    ctx.fillText('키: WASD/방향키, B, M, H', x + 10, y + h - 10);
     ctx.restore();
   }
 
@@ -1839,6 +1932,24 @@
     ctx.restore();
   }
 
+  function handleCanvasSelectUpgrade(x, y) {
+    if (!isChoosingUpgrade) return;
+    for (const rect of upgradeChoiceRects) {
+      if (
+        x >= rect.x && x <= rect.x + rect.w &&
+        y >= rect.y && y <= rect.y + rect.h
+      ) {
+        const choice = upgradeChoices[rect.index];
+        applyUpgrade(choice);
+        break;
+      }
+    }
+  }
+
+  /* =========================================================
+   * 16. 메인 draw() & 루프
+   * ======================================================= */
+
   function draw() {
     if (gameState === 'menu') {
       drawMenu();
@@ -1859,8 +1970,10 @@
     }
     ctx.translate(shakeX, shakeY);
 
+    // 월드 좌표 → 화면 중심에 플레이어
     ctx.translate(canvas.width / 2 - player.x, canvas.height / 2 - player.y);
 
+    // 슬로우 오라
     if (slowAuraRadius > 0) {
       ctx.save();
       ctx.globalAlpha = 0.12;
@@ -1872,24 +1985,30 @@
       ctx.restore();
     }
 
+    // 플레이어
     ctx.fillStyle = '#4caf50';
     drawCircle(player.x, player.y, player.r);
 
+    // 회전 칼날
     for (let i = 0; i < orbitBlades.length; i++) {
       drawCrescentBlade(orbitBlades[i]);
     }
 
+    // 적
     const now = performance.now();
     for (let i = 0; i < enemies.length; i++) {
       drawEnemy(enemies[i], now);
     }
 
+    // 번개
     drawLightningArcs();
 
+    // 총알
     for (let i = 0; i < bullets.length; i++) {
       drawBullet(bullets[i]);
     }
 
+    // 경험치 구슬
     for (let i = 0; i < xpOrbs.length; i++) {
       const o = xpOrbs[i];
       if (o.value > 1) {
@@ -1900,6 +2019,7 @@
       drawCircle(o.x, o.y, o.value > 1 ? 6 : 5);
     }
 
+    // 하트
     ctx.fillStyle = '#ff4081';
     ctx.shadowColor = '#ff80ab';
     ctx.shadowBlur = 8;
@@ -1911,6 +2031,7 @@
 
     ctx.restore();
 
+    // 피격 플래시
     if (hitFlashTime > 0 && hitFlashDuration > 0) {
       const t = hitFlashTime / hitFlashDuration;
       ctx.save();
@@ -1920,15 +2041,19 @@
       ctx.restore();
     }
 
+    // 상단 상태창
     drawStatusPanel();
 
+    // 레벨업 / 스테이지 팝업
     drawLevelPopup();
     drawStagePopup();
 
+    // 미니맵 / 업그레이드 / 도움말
     drawMiniMap();
     drawUpgradeMenu();
     drawHelpOverlay();
 
+    // 게임 오버 텍스트
     if (gameState === 'gameover') {
       ctx.fillStyle = '#fff';
       ctx.font = '40px sans-serif';
@@ -1942,19 +2067,17 @@
     }
   }
 
-  function handleCanvasSelectUpgrade(x, y) {
-    if (!isChoosingUpgrade) return;
-    for (const rect of upgradeChoiceRects) {
-      if (
-        x >= rect.x && x <= rect.x + rect.w &&
-        y >= rect.y && y <= rect.y + rect.h
-      ) {
-        const choice = upgradeChoices[rect.index];
-        applyUpgrade(choice);
-        break;
-      }
-    }
+  function loop(timestamp) {
+    const dt = (timestamp - lastTime) / 1000;
+    lastTime = timestamp;
+    update(dt);
+    draw();
+    requestAnimationFrame(loop);
   }
+
+  /* =========================================================
+   * 17. 캔버스 클릭 / 터치 이벤트 (메뉴/게임오버/업그레이드 선택)
+   * ======================================================= */
 
   canvas.addEventListener('click', e => {
     const rect = canvas.getBoundingClientRect();
@@ -2024,18 +2147,16 @@
     }
   }, { passive: true });
 
-  function loop(timestamp) {
-    const dt = (timestamp - lastTime) / 1000;
-    lastTime = timestamp;
-    update(dt);
-    draw();
-    requestAnimationFrame(loop);
-  }
+  /* =========================================================
+   * 18. 초기 실행
+   * ======================================================= */
 
   loadBestScore();
   resetGame();
   gameState = 'menu';
   requestAnimationFrame(loop);
+
+})(); // IIFE 끝
 </script>
 </body>
 </html>
